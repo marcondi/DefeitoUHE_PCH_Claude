@@ -70,7 +70,9 @@ textarea{min-height:84px;resize:vertical}
 .fbody{flex:1;overflow:auto;padding:12px;display:grid;gap:10px;align-content:start;max-width:760px;width:100%;margin:0 auto}
 #fVideo{width:100%;max-height:38vh;background:#000;border-radius:4px;object-fit:contain}
 #field button{min-height:46px;font-size:15px}
-@media print{#viewer,#auditBox,#field{display:none!important}}
+#stopFab{position:fixed;right:14px;bottom:14px;z-index:80;background:var(--err);color:#fff;border:0;padding:14px 18px;font-size:15px;border-radius:28px;box-shadow:0 2px 10px #000a}
+#stopFab.hidden{display:none}
+@media print{#viewer,#auditBox,#field,#stopFab{display:none!important}}
 </style>
 </head>
 <body>
@@ -81,6 +83,7 @@ textarea{min-height:84px;resize:vertical}
     <input id="apiKey" type="password" placeholder="Chave da API Gemini" autocomplete="off" aria-label="Chave da API Gemini">
     <button id="saveKey">Salvar chave</button>
     <button id="detect">Detectar modelos</button>
+    <button id="ping">🩺 Testar conexão</button>
     <button id="fieldBtn" class="primary">📱 Modo campo</button>
   </div>
 </header>
@@ -163,6 +166,7 @@ textarea{min-height:84px;resize:vertical}
 </div>
 </main>
 
+<button id="stopFab" class="hidden" aria-label="Parar geração">⏹ Parar</button>
 <div id="field" class="hidden" role="dialog" aria-label="Modo campo">
   <div class="vbar"><strong>📱 Modo campo</strong><button id="fClose">✕ Fechar</button></div>
   <div class="fbody">
@@ -257,6 +261,11 @@ const CHECKLIST_SCHEMA = { type: "OBJECT", required: ["etapas"], properties: {
     fase: { type: "STRING" }, acao: { type: "STRING" }, detalhe: { type: "STRING" }, arquivo: { type: "STRING" },
     pagina: { type: "INTEGER" }, referencia: { type: "STRING" }, evidencia: { type: "STRING" }, risco: { type: "STRING" } } } } } };
 
+const LIMITS = { first: 300000, idle: 60000, maxChars: 30000 };
+const REPEAT_NOTE = "\n\n⚠️ Resposta interrompida: o modelo entrou em repetição. Reformule a pergunta ou tente outro modelo.";
+const LIMIT_NOTE = "\n\n⚠️ Resposta interrompida por tamanho excessivo.";
+const IDLE_NOTE = "\n\n⚠️ Resposta interrompida: o modelo parou de responder.";
+const STOP_NOTE = "\n\n⚠️ Geração interrompida por você.";
 const GLOSSARY_KEY = "hydrodiag.glossary";
 const DEFAULT_GLOSSARY = [
   "regulador de velocidade = rv = uhrv = governor",
@@ -301,6 +310,57 @@ function resolveMime(file) {
   if (file.type) return file.type;
   const ext = file.name.split(".").pop().toLowerCase();
   return { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png" }[ext] || "";
+}
+
+let stopFlag = false, stopHandle = null, genStatus = "";
+
+/**
+ * Define a etapa mostrada durante a geração (com cronômetro).
+ * @param {string} msg Texto da etapa.
+ */
+function phase(msg) { genStatus = msg; }
+
+/**
+ * Tamanho aproximado do envio (dados inline + texto) em megabytes.
+ * @param {Array} contents Conteúdos do Gemini.
+ * @returns {string} Tamanho com uma casa decimal.
+ */
+function payloadMB(contents) {
+  let n = 0;
+  for (const c of contents) for (const p of c.parts) n += p.inlineData ? p.inlineData.data.length : (p.text || "").length;
+  return (n / 1048576).toFixed(1);
+}
+
+/** Pede a interrupção da geração (ou da indexação) em andamento. */
+function requestStop() { stopFlag = true; if (stopHandle) stopHandle(); }
+
+/**
+ * Aguarda uma promessa com tempo limite.
+ * @param {Promise} promise Promessa.
+ * @param {number} ms Limite em milissegundos.
+ * @param {string} msg Mensagem do erro de tempo esgotado.
+ * @returns {Promise} Resultado da promessa ou erro de tempo esgotado.
+ */
+function withTimeout(promise, ms, msg) {
+  let t;
+  const timer = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(msg)), ms); });
+  return Promise.race([promise, timer]).finally(() => clearTimeout(t));
+}
+
+/**
+ * Detecta repetição degenerada: o trecho final (120 caracteres) aparece 4 vezes ou mais nos últimos 6000 caracteres.
+ * @param {string} acc Texto acumulado.
+ * @returns {number} Posição do fim da primeira cópia do trecho repetido, ou -1.
+ */
+function findRepetition(acc) {
+  if (acc.length < 600) return -1;
+  const tail = acc.slice(-120);
+  const base = Math.max(0, acc.length - 6000);
+  const win = acc.slice(base);
+  let n = 0, pos = win.indexOf(tail);
+  const first = pos;
+  while (pos !== -1) { n++; pos = win.indexOf(tail, pos + 1); }
+  return n >= 4 ? base + first + tail.length : -1;
 }
 
 /** @returns {object} Índice de projeto vazio (folhas, bornes, materiais, sinais e páginas já indexadas). */
@@ -418,7 +478,7 @@ function parsePages(sel, total) {
     const m = part.match(/^(\d+)(?:-(\d+))?$/);
     if (!m) continue;
     const a = +m[1], b = +(m[2] || m[1]);
-    for (let n = Math.min(a, b); n <= Math.max(a, b); n++) if (n >= 1 && n <= total) set.add(n);
+    for (let n = Math.max(1, Math.min(a, b)); n <= Math.min(total, Math.max(a, b)); n++) set.add(n);
   }
   return set.size ? [...set].sort((x, y) => x - y) : null;
 }
@@ -516,6 +576,7 @@ class GeminiGateway {
    * @param {string[]} models Modelos em ordem de preferência.
    */
   constructor(apiKey, models) {
+    this.phase = () => {};
     this.models = models;
     this.lastModel = "";
     this.ai = new GoogleGenAI({ apiKey });
@@ -526,16 +587,41 @@ class GeminiGateway {
    * @param {Array} contents Histórico no formato do Gemini.
    * @param {string} [instruction] systemInstruction do turno (diagnóstico ou chat).
    * @param {(partial:string)=>void} [onText] Callback com o texto acumulado (streaming).
-   * @returns {Promise<string>} Texto completo gerado pelo modelo.
+   * @returns {Promise<string>} Texto completo, ou parcial com aviso se houve parada, repetição ou silêncio do modelo.
    */
   async generate(contents, instruction = DIAG_INSTRUCTION, onText) {
     let lastErr;
+    this.warn = "";
+    stopFlag = false;
     for (const model of this.models) {
       let acc = "";
+      this.phase(`Enviando ${payloadMB(contents)} MB para ${model} e aguardando a primeira resposta`);
       try {
-        const stream = await this.ai.models.generateContentStream({ model, contents, config: { systemInstruction: instruction } });
-        for await (const chunk of stream) {
-          acc += chunk.text ?? "";
+        const stream = await withTimeout(
+          this.ai.models.generateContentStream({ model, contents, config: { systemInstruction: instruction } }),
+          LIMITS.first, `O modelo ${model} não respondeu em ${LIMITS.first / 1000} s. Tente "Detectar modelos".`);
+        const it = stream[Symbol.asyncIterator]();
+        const stopP = new Promise((res) => { stopHandle = () => res({ stop: true }); });
+        let end = "";
+        for (;;) {
+          const limit = acc ? LIMITS.idle : LIMITS.first;
+          let r;
+          try {
+            r = await withTimeout(Promise.race([it.next(), stopP]), limit, `O modelo ${model} parou de responder (${limit / 1000} s sem texto novo).`);
+          } catch (e) { if (!acc) throw e; end = IDLE_NOTE; break; }
+          if (r.stop) { if (!acc) throw new Error("Geração interrompida."); end = STOP_NOTE; break; }
+          if (r.done) break;
+          if (!acc) this.phase(`Recebendo resposta de ${model}`);
+          acc += r.value.text ?? "";
+          if (onText) onText(acc);
+          const cut = findRepetition(acc);
+          if (cut !== -1) { acc = acc.slice(0, cut); end = REPEAT_NOTE; break; }
+          if (acc.length > LIMITS.maxChars) { end = LIMIT_NOTE; break; }
+        }
+        if (end) {
+          Promise.resolve().then(() => it.return && it.return()).catch(() => {});
+          acc += end;
+          this.warn = end.replace(/^\s*⚠️\s*/, "").trim();
           if (onText) onText(acc);
         }
         this.lastModel = model;
@@ -543,6 +629,25 @@ class GeminiGateway {
       } catch (err) {
         lastErr = err;
         if (acc || !isModelUnavailable(err)) throw err;
+      } finally { stopHandle = null; }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Teste rápido de chave, rede e modelo (prompt mínimo, limite de 30 s por modelo).
+   * @returns {Promise<{model:string,ms:number}>} Primeiro modelo que respondeu e a latência.
+   */
+  async ping() {
+    let lastErr;
+    for (const model of this.models) {
+      const t0 = Date.now();
+      try {
+        await withTimeout(this.ai.models.generateContent({ model, contents: [{ role: "user", parts: [{ text: "Responda apenas: ok" }] }] }), 30000, `O modelo ${model} não respondeu em 30 s.`);
+        return { model, ms: Date.now() - t0 };
+      } catch (err) {
+        lastErr = err;
+        if (!isModelUnavailable(err) && !/não respondeu/.test(String(err.message))) throw err;
       }
     }
     throw lastErr;
@@ -559,7 +664,7 @@ class GeminiGateway {
     let lastErr;
     for (const model of this.models) {
       try {
-        const res = await this.ai.models.generateContent({ model, contents, config: { systemInstruction: instruction, responseMimeType: "application/json", responseSchema: schema } });
+        const res = await withTimeout(this.ai.models.generateContent({ model, contents, config: { systemInstruction: instruction, responseMimeType: "application/json", responseSchema: schema } }), LIMITS.first, `O modelo ${model} não respondeu em ${LIMITS.first / 1000} s.`);
         this.lastModel = model;
         return res.text ?? "";
       } catch (err) { lastErr = err; if (!isModelUnavailable(err)) throw err; }
@@ -575,7 +680,7 @@ class GeminiGateway {
   async countTokens(contents) {
     let lastErr;
     for (const model of this.models) {
-      try { return { n: (await this.ai.models.countTokens({ model, contents })).totalTokens, model }; }
+      try { return { n: (await withTimeout(this.ai.models.countTokens({ model, contents }), LIMITS.first, "Tempo esgotado ao contar tokens.")).totalTokens, model }; }
       catch (err) { lastErr = err; if (!isModelUnavailable(err)) throw err; }
     }
     throw lastErr;
@@ -810,6 +915,7 @@ function buildGateway() {
   try { saved = JSON.parse(localStorage.getItem(FALLBACK_STORAGE) || "[]"); } catch {}
   const models = [...new Set([chosen, ...saved, ...DEFAULT_MODELS])];
   lastGateway = new GeminiGateway(key, models);
+  lastGateway.phase = phase;
   return lastGateway;
 }
 
@@ -869,6 +975,29 @@ function setStatus(msg, isError = false) {
 let checklist = null, checks = {}, viewerUrl = "", repo = null;
 try { repo = new CaseRepository(); } catch { /* sem IndexedDB: casos não serão salvos */ }
 let catalog = [], glossary = [];
+
+let genTimer = null;
+
+/**
+ * Mostra o botão Parar com cronômetro enquanto há geração ou indexação em andamento.
+ * @param {boolean} on Ligar ou desligar.
+ */
+function setGenerating(on) {
+  const b = $("stopFab");
+  clearInterval(genTimer);
+  b.classList.toggle("hidden", !on);
+  if (!on) return;
+  b.disabled = false;
+  const t0 = Date.now();
+  genStatus = "Preparando os arquivos";
+  const tick = () => {
+    const secs = Math.round((Date.now() - t0) / 1000);
+    b.textContent = `⏹ Parar (${secs} s)`;
+    setStatus(`${genStatus} (${secs} s)${secs > 45 ? " — PDFs grandes podem levar alguns minutos; use ⏹ Parar se preferir" : ""}`);
+  };
+  tick();
+  genTimer = setInterval(tick, 1000);
+}
 
 let fieldStream = null, fieldNote = "", recog = null;
 const FIELD_NOTE = "\n\nFoto de campo anexada: descreva o que é visível no painel/equipamento (TAGs, bandeirolas, LEDs, posição de chaves e disjuntores) e relacione com os desenhos. Não afirme estados que não estejam visíveis na foto.";
@@ -1098,10 +1227,13 @@ function mergeIndex(ix, data, name, pages) {
  * @param {number} [chunk] Páginas por bloco (blocos menores melhoram a leitura de páginas densas).
  */
 async function indexProject(chunk = CHUNK_PAGES) {
+  chunk = Math.max(1, Math.floor(Number(chunk)) || CHUNK_PAGES);
   const pdfs = session.documents.filter((d) => d.mime === "application/pdf" && d.pageCount);
   if (!pdfs.length) { setStatus("Anexe um PDF para indexar (o pdf-lib precisa ter carregado).", true); return; }
   const ix = session.index;
   let failed = 0;
+  stopFlag = false;
+  setGenerating(true);
   try {
     const gw = buildGateway();
     for (const d of pdfs) {
@@ -1110,6 +1242,7 @@ async function indexProject(chunk = CHUNK_PAGES) {
       const todo = all.filter((n) => !done.has(n));
       for (let k = 0; k < todo.length; k += chunk) {
         const pages = todo.slice(k, k + chunk);
+        if (stopFlag) throw new Error("Parada pedida.");
         $("indexInfo").textContent = `Indexando ${d.name}: págs. ${pages[0]}–${pages[pages.length - 1]} (${all.length - todo.length + k}/${all.length})…`;
         const bytes = await slicePdf(d.bytes, pages);
         const parts = [{ text: `Arquivo com ${pages.length} páginas. Retorne 'pagina' como a posição neste arquivo (1 a ${pages.length}).` }, { inlineData: { mimeType: d.mime, data: toBase64(bytes) } }];
@@ -1118,9 +1251,11 @@ async function indexProject(chunk = CHUNK_PAGES) {
         saveCase();
       }
     }
+    setGenerating(false);
     updateIndexInfo();
     setStatus(failed ? `Indexação concluída com ${failed} bloco(s) ilegíveis; clique de novo para tentar só esses.` : "Indexação concluída.", !!failed);
   } catch (err) {
+    setGenerating(false);
     updateIndexInfo();
     setStatus(`Indexação interrompida: ${explainError(err)} Clique de novo para continuar de onde parou.`, true);
   }
@@ -1449,10 +1584,21 @@ async function copyResult() {
 async function runDiagnosis(quick) {
   const query = $("query").value.trim();
   if (!query) { setStatus("Descreva o alarme ou sintoma.", true); return; }
-  const ctx = $("useIndex").checked ? await buildLocalContext(query) : null;
+  setStatus("Buscando no índice e no catálogo…");
+  let ctx = null;
+  try { ctx = $("useIndex").checked ? await buildLocalContext(query) : null; } catch { /* segue sem contexto local */ }
+  const big = session.documents.filter((d) => !d.sent && d.mime === "application/pdf" && !(ctx && ctx.pagesByDoc[d.id]) && (parsePages(d.selection, d.pageCount) || { length: d.pageCount }).length > 40);
+  if (big.length) {
+    const n = (parsePages(big[0].selection, big[0].pageCount) || { length: big[0].pageCount }).length;
+    if (!confirm(`"${big[0].name}" será enviado com ${n} páginas (≈${(n * 258).toLocaleString("pt-BR")} tokens). Pode levar minutos e consumir muita cota. Dica: indexe o projeto ou escolha as páginas. Enviar mesmo assim?`)) {
+      setStatus("Envio cancelado. Escolha as páginas ou indexe o projeto.", true);
+      return;
+    }
+  }
   const text = `Falha/alarme consultado: ${query}${quick ? "\n\nFoco: " + QUICK_ACTIONS[quick] : ""}\n\nResponda no formato obrigatório.${ctx ? ctx.text : ""}${takeFieldNote()}`;
   setStatus("Analisando desenhos com Gemini…");
   document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  setGenerating(true);
   showResult();
   checklist = null;
   checks = {};
@@ -1464,11 +1610,12 @@ async function runDiagnosis(quick) {
     $("result").innerHTML = renderMarkdown(lastAnswer);
     session.title = session.title || query.slice(0, 80);
     saveCase();
-    setStatus(`Diagnóstico concluído (modelo: ${lastGateway ? lastGateway.lastModel : "?"}).`);
+    setStatus(`Diagnóstico concluído (modelo: ${lastGateway ? lastGateway.lastModel : "?"}).${lastGateway && lastGateway.warn ? ` ⚠️ ${lastGateway.warn}` : ""}`);
   } catch (err) {
     $("result").innerHTML = `<p>⚠️ ${esc(explainError(err))}</p>`;
     setStatus(`Erro: ${explainError(err)}`, true);
   } finally {
+    setGenerating(false);
     document.querySelectorAll("button").forEach((b) => (b.disabled = false));
   }
 }
@@ -1521,6 +1668,7 @@ async function sendChat() {
   $("chatInput").value = "";
   $("chatSend").disabled = true;
   $("attachChat").disabled = true;
+  setGenerating(true);
   let box = null;
   try {
     box = appendChat("model", "…");
@@ -1536,9 +1684,19 @@ async function sendChat() {
     appendChat("model", `⚠️ ${explainError(err)}`);
     $("chatInput").value = typed;
   } finally {
+    setGenerating(false);
     $("chatSend").disabled = false;
     $("attachChat").disabled = false;
   }
+}
+
+/** Testa chave, rede e modelo com um prompt mínimo e informa a latência. */
+async function pingModel() {
+  setStatus("Testando conexão com o Gemini…");
+  try {
+    const r = await buildGateway().ping();
+    setStatus(`Conexão OK: ${r.model} respondeu em ${(r.ms / 1000).toFixed(1)} s. Se o diagnóstico demorar muito, o gargalo é o tamanho dos arquivos ou o tempo de raciocínio do modelo.`);
+  } catch (err) { setStatus(`Erro: ${explainError(err)}`, true); }
 }
 
 /**
@@ -1635,6 +1793,9 @@ function bindEvents() {
   $("fGo").onclick = fieldDiagnose;
   $("fSpeak").onclick = speakAnswer;
   new MutationObserver(() => { $("fResult").innerHTML = $("result").innerHTML; }).observe($("result"), { childList: true, subtree: true });
+  $("ping").onclick = pingModel;
+  $("stopFab").onclick = requestStop;
+  new MutationObserver(() => { if (!$("field").classList.contains("hidden")) $("fInfo").textContent = $("status").textContent; }).observe($("status"), { childList: true, subtree: true, characterData: true });
   $("auditBtn").onclick = startAudit;
   $("auditApply").onclick = applyAudit;
   $("auditClose").onclick = () => $("auditBox").classList.add("hidden");
