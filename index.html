@@ -234,7 +234,7 @@ FORMATO OBRIGATÓRIO DE RESPOSTA:
 const RIGOR = `
 
 REGRAS DE EVIDÊNCIA E SEGURANÇA (obrigatórias):
-- Marque cada afirmação técnica com [LIDO: nome-do-arquivo.pdf, folha, pág. N, coordenada] quando estiver no desenho (repita o nome exato do arquivo e use sempre o número da página ORIGINAL do arquivo, nunca a posição dentro de um PDF recortado), ou [INFERIDO] quando for dedução ou conhecimento típico de usina. Nunca use certeza absoluta (ex.: "100% comprovado"); informe o grau de confiança.
+- Marque cada afirmação técnica com [LIDO: nome-do-arquivo.pdf, folha, pág. N, coordenada] quando estiver no desenho (repita o nome exato do arquivo e use sempre o número da página ORIGINAL do arquivo, nunca a posição dentro de um PDF recortado), ou [INFERIDO] quando for dedução ou conhecimento típico de usina. Nunca use certeza absoluta (ex.: "100% comprovado"); informe a confiança apenas como alta, média ou baixa, com o motivo, e nunca use percentuais de probabilidade.
 - Informe a revisão (as-built) de cada folha citada, se constar na legenda, e avise se houver mais de uma versão.
 - Use somente as tensões lidas no desenho citado; se não estiverem legíveis, diga isso. Não presuma 125 Vcc ou 220 Vca.
 - Separe "medições com circuito energizado (tensão)" de "testes com circuito desenergizado e bloqueado (continuidade)", na ordem: alimentação a montante, queda sobre proteção/fusível, entrada digital do CLP.
@@ -261,7 +261,7 @@ const CHECKLIST_SCHEMA = { type: "OBJECT", required: ["etapas"], properties: {
     fase: { type: "STRING" }, acao: { type: "STRING" }, detalhe: { type: "STRING" }, arquivo: { type: "STRING" },
     pagina: { type: "INTEGER" }, referencia: { type: "STRING" }, evidencia: { type: "STRING" }, risco: { type: "STRING" } } } } } };
 
-const LIMITS = { first: 300000, idle: 60000, maxChars: 30000 };
+const LIMITS = { first: 600000, idle: 60000, maxChars: 30000 };
 const REPEAT_NOTE = "\n\n⚠️ Resposta interrompida: o modelo entrou em repetição. Reformule a pergunta ou tente outro modelo.";
 const LIMIT_NOTE = "\n\n⚠️ Resposta interrompida por tamanho excessivo.";
 const IDLE_NOTE = "\n\n⚠️ Resposta interrompida: o modelo parou de responder.";
@@ -1223,6 +1223,35 @@ function mergeIndex(ix, data, name, pages) {
 }
 
 /**
+ * Indexa um bloco de páginas; se o JSON vier inválido (ex.: resposta truncada), divide o bloco ao meio e tenta de novo.
+ * @param {GeminiGateway} gw Gateway.
+ * @param {object} d Documento.
+ * @param {number[]} pages Páginas originais do bloco.
+ * @param {object} ix Índice do caso.
+ * @returns {Promise<number>} Quantidade de páginas que não puderam ser lidas.
+ */
+async function indexChunk(gw, d, pages, ix) {
+  if (stopFlag) throw new Error("Parada pedida.");
+  const bytes = await slicePdf(d.bytes, pages);
+  const parts = [{ text: `Arquivo com ${pages.length} páginas. Retorne 'pagina' como a posição neste arquivo (1 a ${pages.length}).` }, { inlineData: { mimeType: d.mime, data: toBase64(bytes) } }];
+  const raw = await gw.generateJson([{ role: "user", parts }], INDEX_INSTRUCTION, INDEX_SCHEMA);
+  let data = null;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  if (data) {
+    mergeIndex(ix, data, d.name, pages);
+    ix.done[d.name] = [...(ix.done[d.name] || []), ...pages];
+    return 0;
+  }
+  if (pages.length === 1) {
+    ix.done[d.name] = [...(ix.done[d.name] || []), ...pages];
+    ix.suspect = [...new Set([...(ix.suspect || []), `${d.name}|${pages[0]}`])];
+    return 1;
+  }
+  const mid = Math.ceil(pages.length / 2);
+  return (await indexChunk(gw, d, pages.slice(0, mid), ix)) + (await indexChunk(gw, d, pages.slice(mid), ix));
+}
+
+/**
  * Indexa os PDFs em blocos (retomável): extrai folhas, bornes, materiais e sinais para busca local.
  * @param {number} [chunk] Páginas por bloco (blocos menores melhoram a leitura de páginas densas).
  */
@@ -1244,16 +1273,13 @@ async function indexProject(chunk = CHUNK_PAGES) {
         const pages = todo.slice(k, k + chunk);
         if (stopFlag) throw new Error("Parada pedida.");
         $("indexInfo").textContent = `Indexando ${d.name}: págs. ${pages[0]}–${pages[pages.length - 1]} (${all.length - todo.length + k}/${all.length})…`;
-        const bytes = await slicePdf(d.bytes, pages);
-        const parts = [{ text: `Arquivo com ${pages.length} páginas. Retorne 'pagina' como a posição neste arquivo (1 a ${pages.length}).` }, { inlineData: { mimeType: d.mime, data: toBase64(bytes) } }];
-        const raw = await gw.generateJson([{ role: "user", parts }], INDEX_INSTRUCTION, INDEX_SCHEMA);
-        try { mergeIndex(ix, JSON.parse(raw), d.name, pages); ix.done[d.name] = [...(ix.done[d.name] || []), ...pages]; } catch { failed++; }
+        failed += await indexChunk(gw, d, pages, ix);
         saveCase();
       }
     }
     setGenerating(false);
     updateIndexInfo();
-    setStatus(failed ? `Indexação concluída com ${failed} bloco(s) ilegíveis; clique de novo para tentar só esses.` : "Indexação concluída.", !!failed);
+    setStatus(failed ? `Indexação concluída; ${failed} página(s) não puderam ser lidas e ficaram como suspeitas (use "Auditar índice" e "Reindexar páginas suspeitas").` : "Indexação concluída.", !!failed);
   } catch (err) {
     setGenerating(false);
     updateIndexInfo();
@@ -1365,7 +1391,7 @@ function updateTokenInfo() {
     const t = estTokens(d);
     total += t;
     const el = document.querySelector(`[data-est="${d.id}"]`);
-    if (el) el.textContent = `≈${t.toLocaleString("pt-BR")} tok`;
+    if (el) el.textContent = `${(d.bytes.byteLength / 1048576).toFixed(1)} MB · ≈${t.toLocaleString("pt-BR")} tok`;
   }
   $("tokenInfo").textContent = total ? `Novos documentos: ≈${total.toLocaleString("pt-BR")} tokens (estimativa local)` : "";
 }
