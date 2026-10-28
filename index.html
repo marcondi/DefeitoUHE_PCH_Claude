@@ -72,6 +72,7 @@ textarea{min-height:84px;resize:vertical}
 #field button{min-height:46px;font-size:15px}
 #stopFab{position:fixed;right:14px;bottom:14px;z-index:80;background:var(--err);color:#fff;border:0;padding:14px 18px;font-size:15px;border-radius:28px;box-shadow:0 2px 10px #000a}
 #stopFab.hidden{display:none}
+select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);padding:8px;border-radius:3px}
 @media print{#viewer,#auditBox,#field,#stopFab{display:none!important}}
 </style>
 </head>
@@ -98,7 +99,7 @@ textarea{min-height:84px;resize:vertical}
     <input id="filePhoto" type="file" accept="image/*" capture="environment" hidden>
     <ul id="files" class="files"></ul>
     <div class="row"><button id="countTok">Contar tokens (API)</button><span id="tokenInfo" class="status"></span></div>
-    <div class="row"><button id="indexBtn">🗂 Indexar projeto</button><button id="indexExport">⬇ Índice (JSON)</button><button id="auditBtn">🔎 Auditar índice</button><span id="indexInfo" class="status"></span></div>
+    <div class="row"><select id="indexMode" aria-label="Modo de indexação"><option value="fast">⚡ Rápido: só folhas</option><option value="full">🔬 Detalhado: sinais, bornes e materiais</option></select><button id="indexBtn">🗂 Indexar projeto</button><button id="indexExport">⬇ Índice (JSON)</button><button id="auditBtn">🔎 Auditar índice</button><span id="indexInfo" class="status"></span></div>
     <div class="row">
       <button id="addNext">Adicionar próximo desenho na sequência</button>
       <button id="photo">📷 Tirar foto</button>
@@ -292,6 +293,12 @@ const INDEX_SCHEMA = { type: "OBJECT", properties: {
   materiais: ARR({ pagina: INT, tag: STR, fabricante: STR, modelo: STR, codigo: STR }),
   sinais: ARR({ pagina: INT, nome: STR, tag: STR, coordenada: STR, destino: STR }) } };
 
+const INDEX_MODES = {
+  fast: { schema: { type: "OBJECT", properties: { folhas: INDEX_SCHEMA.properties.folhas } }, extra: " Nesta passagem extraia APENAS 'folhas'.", doneKey: "done", label: "folhas" },
+  full: { schema: { type: "OBJECT", properties: { sinais: INDEX_SCHEMA.properties.sinais, bornes: INDEX_SCHEMA.properties.bornes, materiais: INDEX_SCHEMA.properties.materiais } }, extra: " Nesta passagem extraia APENAS 'sinais', 'bornes' e 'materiais'.", doneKey: "doneFull", label: "detalhes" }
+};
+const INDEX_CONCURRENCY = 3;
+
 const QUICK_ACTIONS = {
   measure: "Onde medir com o multímetro? Detalhe bornes, pontas de prova e valores esperados.",
   fix: "Como resolver e corrigir a falha? Detalhe o procedimento de campo e os cuidados de segurança.",
@@ -364,7 +371,7 @@ function findRepetition(acc) {
 }
 
 /** @returns {object} Índice de projeto vazio (folhas, bornes, materiais, sinais e páginas já indexadas). */
-function emptyIndex() { return { folhas: [], bornes: [], materiais: [], sinais: [], done: {}, suspect: [] }; }
+function emptyIndex() { return { folhas: [], bornes: [], materiais: [], sinais: [], done: {}, doneFull: {}, suspect: [] }; }
 
 /**
  * Normaliza texto para busca (sem acentos, minúsculo).
@@ -654,20 +661,33 @@ class GeminiGateway {
   }
 
   /**
-   * Gera resposta JSON conforme um schema, com fallback de modelo.
+   * Gera resposta JSON conforme um schema, com fallback de modelo. No modo leve, tenta primeiro raciocínio desligado (thinkingBudget 0) e volta ao padrão se o modelo recusar.
    * @param {Array} contents Conteúdos.
    * @param {string} instruction systemInstruction.
    * @param {object} schema responseSchema do Gemini.
+   * @param {boolean} [light] Pede raciocínio mínimo (tarefas de extração).
    * @returns {Promise<string>} JSON em texto.
    */
-  async generateJson(contents, instruction, schema) {
+  async generateJson(contents, instruction, schema, light = false) {
     let lastErr;
+    this.thinkIdx = this.thinkIdx || {};
     for (const model of this.models) {
-      try {
-        const res = await withTimeout(this.ai.models.generateContent({ model, contents, config: { systemInstruction: instruction, responseMimeType: "application/json", responseSchema: schema } }), LIMITS.first, `O modelo ${model} não respondeu em ${LIMITS.first / 1000} s.`);
-        this.lastModel = model;
-        return res.text ?? "";
-      } catch (err) { lastErr = err; if (!isModelUnavailable(err)) throw err; }
+      const variants = light ? [{ thinkingBudget: 0 }, null] : [null];
+      for (let vi = light ? this.thinkIdx[model] || 0 : 0; vi < variants.length; vi++) {
+        const config = { systemInstruction: instruction, responseMimeType: "application/json", responseSchema: schema };
+        if (variants[vi]) config.thinkingConfig = variants[vi];
+        try {
+          const res = await withTimeout(this.ai.models.generateContent({ model, contents, config }), LIMITS.first, `O modelo ${model} não respondeu em ${LIMITS.first / 1000} s.`);
+          this.thinkIdx[model] = vi;
+          this.lastModel = model;
+          return res.text ?? "";
+        } catch (err) {
+          lastErr = err;
+          if (light && vi < variants.length - 1 && /think/i.test(String(err.message))) continue;
+          if (!isModelUnavailable(err)) throw err;
+          break;
+        }
+      }
     }
     throw lastErr;
   }
@@ -1100,6 +1120,7 @@ let audit = null;
  * @returns {string} Texto curto.
  */
 function describeItem(type, x) {
+  if (type === "folhas") return `${x.folha || "?"} — ${x.titulo || ""} (${x.painel || "?"})`;
   if (type === "sinais") return `${x.nome} | TAG ${x.tag || "?"} | ${x.coordenada || ""} | destino ${x.destino || "?"}`;
   if (type === "bornes") return `${x.regua}:${x.borne} ${x.funcao || ""} → ${x.destino || ""}`;
   return `${x.tag} ${x.fabricante || ""} ${x.modelo || ""} cód. ${x.codigo || ""}`;
@@ -1112,7 +1133,7 @@ function describeItem(type, x) {
  */
 function sampleIndex(ix) {
   const out = [];
-  for (const [type, n] of Object.entries({ sinais: 4, bornes: 3, materiais: 3 })) {
+  for (const [type, n] of Object.entries({ folhas: 4, sinais: 3, bornes: 2, materiais: 2 })) {
     const pool = ix[type].filter((it) => it.ok !== true);
     for (let k = pool.length - 1; k > 0; k--) { const r = Math.floor(Math.random() * (k + 1)); [pool[k], pool[r]] = [pool[r], pool[k]]; }
     pool.slice(0, n).forEach((item) => out.push({ type, item }));
@@ -1171,6 +1192,7 @@ async function reindexSuspect() {
   for (const key of sus) {
     const cut = key.lastIndexOf("|"), name = key.slice(0, cut), pg = Number(key.slice(cut + 1));
     ix.done[name] = (ix.done[name] || []).filter((n) => n !== pg);
+    if (ix.doneFull && ix.doneFull[name]) ix.doneFull[name] = ix.doneFull[name].filter((n) => n !== pg);
   }
   ix.suspect = [];
   $("auditResult").textContent = "";
@@ -1205,8 +1227,9 @@ function resetGlossary() {
 function updateIndexInfo() {
   const ix = session.index;
   const pgs = Object.values(ix.done).reduce((a, v) => a + v.length, 0);
+  const pg2 = Object.values(ix.doneFull || {}).reduce((a, v) => a + v.length, 0);
   const okN = ["folhas", "bornes", "materiais", "sinais"].reduce((a, k) => a + ix[k].filter((x) => x.ok).length, 0);
-  $("indexInfo").textContent = pgs ? `Índice: ${ix.folhas.length} folhas, ${ix.bornes.length} bornes, ${ix.materiais.length} materiais, ${ix.sinais.length} sinais (${pgs} págs.)${okN ? ` · ${okN} confirmados` : ""}` : "";
+  $("indexInfo").textContent = (pgs || pg2) ? `Índice: ${ix.folhas.length} folhas, ${ix.bornes.length} bornes, ${ix.materiais.length} materiais, ${ix.sinais.length} sinais (${pgs} págs.${pg2 ? `; detalhes em ${pg2}` : ""})${okN ? ` · ${okN} confirmados` : ""}` : "";
 }
 
 /**
@@ -1223,43 +1246,49 @@ function mergeIndex(ix, data, name, pages) {
 }
 
 /**
- * Indexa um bloco de páginas; se o JSON vier inválido (ex.: resposta truncada), divide o bloco ao meio e tenta de novo.
+ * Indexa um bloco de páginas no modo escolhido; se o JSON vier inválido (ex.: resposta truncada), divide o bloco ao meio e tenta de novo.
  * @param {GeminiGateway} gw Gateway.
  * @param {object} d Documento.
  * @param {number[]} pages Páginas originais do bloco.
  * @param {object} ix Índice do caso.
+ * @param {string} mode "fast" (folhas) ou "full" (sinais, bornes e materiais).
  * @returns {Promise<number>} Quantidade de páginas que não puderam ser lidas.
  */
-async function indexChunk(gw, d, pages, ix) {
+async function indexChunk(gw, d, pages, ix, mode) {
   if (stopFlag) throw new Error("Parada pedida.");
+  const m = INDEX_MODES[mode];
   const bytes = await slicePdf(d.bytes, pages);
   const parts = [{ text: `Arquivo com ${pages.length} páginas. Retorne 'pagina' como a posição neste arquivo (1 a ${pages.length}).` }, { inlineData: { mimeType: d.mime, data: toBase64(bytes) } }];
-  const raw = await gw.generateJson([{ role: "user", parts }], INDEX_INSTRUCTION, INDEX_SCHEMA);
+  const raw = await gw.generateJson([{ role: "user", parts }], INDEX_INSTRUCTION + m.extra, m.schema, true);
   let data = null;
   try { data = JSON.parse(raw); } catch { data = null; }
+  const done = (ix[m.doneKey] = ix[m.doneKey] || {});
   if (data) {
     mergeIndex(ix, data, d.name, pages);
-    ix.done[d.name] = [...(ix.done[d.name] || []), ...pages];
+    done[d.name] = [...(done[d.name] || []), ...pages];
     return 0;
   }
   if (pages.length === 1) {
-    ix.done[d.name] = [...(ix.done[d.name] || []), ...pages];
+    done[d.name] = [...(done[d.name] || []), ...pages];
     ix.suspect = [...new Set([...(ix.suspect || []), `${d.name}|${pages[0]}`])];
     return 1;
   }
   const mid = Math.ceil(pages.length / 2);
-  return (await indexChunk(gw, d, pages.slice(0, mid), ix)) + (await indexChunk(gw, d, pages.slice(mid), ix));
+  return (await indexChunk(gw, d, pages.slice(0, mid), ix, mode)) + (await indexChunk(gw, d, pages.slice(mid), ix, mode));
 }
 
 /**
- * Indexa os PDFs em blocos (retomável): extrai folhas, bornes, materiais e sinais para busca local.
+ * Indexa os PDFs em blocos, com até 3 blocos em paralelo (retomável). Modo rápido: só folhas; detalhado: sinais, bornes e materiais.
  * @param {number} [chunk] Páginas por bloco (blocos menores melhoram a leitura de páginas densas).
  */
 async function indexProject(chunk = CHUNK_PAGES) {
   chunk = Math.max(1, Math.floor(Number(chunk)) || CHUNK_PAGES);
+  const mode = $("indexMode").value === "full" ? "full" : "fast";
+  const m = INDEX_MODES[mode];
   const pdfs = session.documents.filter((d) => d.mime === "application/pdf" && d.pageCount);
   if (!pdfs.length) { setStatus("Anexe um PDF para indexar (o pdf-lib precisa ter carregado).", true); return; }
   const ix = session.index;
+  ix[m.doneKey] = ix[m.doneKey] || {};
   let failed = 0;
   stopFlag = false;
   setGenerating(true);
@@ -1267,15 +1296,39 @@ async function indexProject(chunk = CHUNK_PAGES) {
     const gw = buildGateway();
     for (const d of pdfs) {
       const all = parsePages(d.selection, d.pageCount) || Array.from({ length: d.pageCount }, (_, k) => k + 1);
-      const done = new Set(ix.done[d.name] || []);
+      const done = new Set(ix[m.doneKey][d.name] || []);
       const todo = all.filter((n) => !done.has(n));
-      for (let k = 0; k < todo.length; k += chunk) {
-        const pages = todo.slice(k, k + chunk);
-        if (stopFlag) throw new Error("Parada pedida.");
-        $("indexInfo").textContent = `Indexando ${d.name}: págs. ${pages[0]}–${pages[pages.length - 1]} (${all.length - todo.length + k}/${all.length})…`;
-        failed += await indexChunk(gw, d, pages, ix);
-        saveCase();
+      const queue = [];
+      for (let k = 0; k < todo.length; k += chunk) queue.push(todo.slice(k, k + chunk));
+      let lastSecs = 0, conc = Math.max(1, Math.min(INDEX_CONCURRENCY, queue.length));
+      const show = (running) => {
+        const msg = `Indexando (${m.label}) ${d.name}: ${(ix[m.doneKey][d.name] || []).length}/${all.length} páginas · ${running} bloco(s) em andamento${lastSecs ? ` · último bloco ${lastSecs} s` : ""}`;
+        $("indexInfo").textContent = msg;
+        phase(msg);
+      };
+      for (;;) {
+        let aborted = false, running = 0;
+        const worker = async () => {
+          while (queue.length && !aborted && !stopFlag) {
+            const pages = queue.shift();
+            const t0 = Date.now();
+            running++;
+            show(running);
+            try { const bad = await indexChunk(gw, d, pages, ix, mode); failed += bad; }
+            catch (e) { aborted = true; queue.unshift(pages); throw e; }
+            finally { running--; }
+            lastSecs = Math.round((Date.now() - t0) / 1000);
+            show(running);
+            saveCase();
+          }
+        };
+        const results = await Promise.allSettled(Array.from({ length: conc }, worker));
+        const bad = results.find((r) => r.status === "rejected");
+        if (!bad) break;
+        if (conc > 1 && /429|RESOURCE_EXHAUSTED/.test(String(bad.reason && bad.reason.message))) { conc = 1; continue; }
+        throw bad.reason;
       }
+      if (stopFlag) throw new Error("Parada pedida.");
     }
     setGenerating(false);
     updateIndexInfo();
@@ -1314,6 +1367,7 @@ async function buildLocalContext(query) {
   ctx.boost = aliases.map((a) => norm(a.tag)).filter((t) => t.length >= 3);
   const eq = [...buildConcepts(query, glossary), ...ctx.concepts].filter((c) => c.length > 1).map((c) => c.slice(0, 5).join(" / "));
   const hits = [
+    ...searchList(ix.folhas, query, 5, ctx).map((x) => ({ k: "folha", x, t: `${x.folha || ""} ${x.titulo || ""} (${x.painel || "?"})` })),
     ...searchList(ix.sinais, query, 6, ctx).map((x) => ({ k: "sinal", x, t: `${x.nome} | TAG ${x.tag || "?"} | ${x.coordenada || ""} | destino ${x.destino || "?"}` })),
     ...searchList(ix.bornes, query, 6, ctx).map((x) => ({ k: "borne", x, t: `${x.regua}:${x.borne} ${x.funcao || ""} → ${x.destino || ""}` })),
     ...searchList(ix.materiais, query, 4, ctx).map((x) => ({ k: "material", x, t: `${x.tag} ${x.fabricante || ""} ${x.modelo || ""} cód. ${x.codigo || ""}` })),
