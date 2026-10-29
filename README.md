@@ -1,18 +1,14 @@
-# HydroDiag AI
+# HydroDiag v2
 
-Diagnóstico eletromecânico e de supervisório para PCH/UHE, com Google Gemini. Página estática única (`index.html`), sem build.
+Diagnóstico de falhas em PCH/UHE. Página estática única (`index.html`), sem build.
 
-## Publicar
-1. GitHub: criar repositório **privado** e enviar estes 3 arquivos (Add file > Upload files).
-2. Vercel: Add New > Project > importar o repositório > Framework "Other", sem comando de build > Deploy.
-3. Cada novo envio ao GitHub publica de novo.
+## Atualizar o site
+No GitHub: Add file > Upload files, envie `index.html` e `vercel.json` (sobrescreve). A Vercel publica sozinha.
 
-## Uso
-- Abra o endereço HTTPS no celular, cole a chave da API Gemini (aistudio.google.com/apikey) e clique em Salvar chave.
-- Câmera e microfone só funcionam em HTTPS (ou localhost).
-- A chave fica no navegador do aparelho. Nunca coloque a chave no código ou no repositório.
-- PDFs, casos, índice e catálogo ficam no IndexedDB do navegador do aparelho (nada é enviado ao servidor de hospedagem).
-- No Google Cloud, restrinja a chave ao endereço publicado (referenciador HTTP).
+## Primeiro uso
+1. Ajustes: cole a chave do Gemini, Salvar, Detectar modelos.
+2. Documentos: adicione o PDF do projeto (o texto é lido no aparelho, uma vez).
+3. Diagnóstico: descreva ou fale o alarme, tire foto se quiser, toque em Diagnosticar.
 
-## Aviso
-Apoio técnico gerado por IA. Confirme bornes, folhas e revisão no projeto oficial. Desenergize e bloqueie (LOTO) e siga a NR-10 antes de qualquer teste.
+A chave fica só no navegador do aparelho; nunca a coloque no código ou no repositório.
+Apoio técnico gerado por IA: confirme no desenho oficial; desenergize e bloqueie (LOTO) e siga a NR-10.
