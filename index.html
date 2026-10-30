@@ -56,7 +56,7 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 <body>
 <header class="top">
   <div class="brand">⚡ HydroDiag<small>Diagnóstico de falhas · PCH/UHE</small></div>
-  <div class="chips"><span id="docChip" class="chip warn">📄 sem documento</span><span id="caseChip" class="chip">—</span></div>
+  <div class="chips"><span id="docChip" class="chip warn">📄 sem documento</span><span id="caseChip" class="chip">—</span><span id="cloudChip" class="chip" role="button" tabindex="0">☁ não conectado</span></div>
 </header>
 <nav id="tabs" aria-label="Seções">
   <button data-tab="diag" class="on"><b>🔎</b>Diagnóstico</button>
@@ -147,8 +147,21 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <select id="cfgTheme"><option value="dark">Escuro</option><option value="light">Claro (ao sol)</option></select>
   </div>
   <div class="card">
+    <h2>☁️ Sincronização (celular · PC · notebook)</h2>
+    <p class="mute">Casos, fotos, PDFs e glossário ficam na sua conta e aparecem em todos os aparelhos em que você entrar. A chave do Gemini nunca sai do aparelho.</p>
+    <div id="cloudLogin" style="display:grid;gap:8px">
+      <input id="cloudEmail" type="email" autocomplete="username" placeholder="e-mail">
+      <input id="cloudPass" type="password" autocomplete="current-password" placeholder="senha (mín. 6 caracteres)">
+      <div class="row"><button id="cloudIn" class="primary">Entrar</button><button id="cloudUp">Criar conta</button></div>
+    </div>
+    <div id="cloudOn" class="hidden" style="display:grid;gap:8px">
+      <strong id="cloudWho"></strong>
+      <div class="row"><button id="cloudSyncBtn" class="primary">⟳ Sincronizar agora</button><button id="cloudOut">Sair</button></div>
+    </div>
+  </div>
+  <div class="card">
     <h2>💾 Backup e transferência</h2>
-    <p class="mute">Exporte o histórico (com fotos) e importe em outro aparelho. A sincronização automática na nuvem será ligada na próxima etapa.</p>
+    <p class="mute">Cópia manual do histórico (com fotos) em arquivo, útil como segurança extra.</p>
     <div class="row"><button id="expAll">⬇ Exportar histórico</button><button id="impBtn">⬆ Importar</button><input id="impFile" type="file" accept="application/json" hidden></div>
   </div>
 </section>
@@ -714,6 +727,7 @@ const cfg = {
 let glossary = parseGlossary(cfg.glossary);
 const state = { docs: [], contents: [], turns: [], caseRec: null, photos: [], chatPhotos: [], focus: "" };
 let lastGateway = null, store = null, viewerUrl = "", recog = null;
+let sb = null, sbUser = null, syncBusy = false, syncTimer = null;
 
 const FIELD_NOTE = "\n\nFoto(s) de campo anexada(s): descreva o que é visível no painel/equipamento (TAGs, bandeirolas, LEDs, posição de chaves e disjuntores) e relacione com os desenhos. Não afirme estados que não estejam visíveis.";
 const FOCUS = {
@@ -904,10 +918,11 @@ async function addDocFiles(files) {
     const mime = resolveMime(f);
     if (!/^(application\/pdf|image\/(jpeg|png))$/.test(mime)) { toast(`Tipo não suportado: ${f.name}`); continue; }
     const bytes = await f.arrayBuffer();
-    const doc = { id: uid(), name: f.name, mime, bytes, pageCount: mime === "application/pdf" ? await countPages(bytes) : 1, texts: null, textStatus: mime === "application/pdf" ? "pendente" : "imagem", addedAt: Date.now() };
+    const doc = { id: uid(), name: f.name, mime, bytes, pageCount: mime === "application/pdf" ? await countPages(bytes) : 1, texts: null, textStatus: mime === "application/pdf" ? "pendente" : "imagem", addedAt: Date.now(), updatedAt: Date.now() };
     state.docs.push(doc);
     if (store) await store.put("docs", doc).catch(() => {});
     renderDocs();
+    scheduleSync();
     if (mime === "application/pdf") await readDocText(doc);
   }
 }
@@ -925,7 +940,9 @@ async function readDocText(doc) {
     const chars = doc.texts.reduce((a, t) => a + t.length, 0);
     doc.textStatus = chars / Math.max(1, doc.texts.length) < 15 ? "sem-texto" : "ok";
   } catch (e) { doc.textStatus = "erro"; doc.textError = e.message; }
+  doc.updatedAt = Date.now();
   if (store) await store.put("docs", doc).catch(() => {});
+  scheduleSync();
   renderDocs();
 }
 
@@ -1158,6 +1175,7 @@ async function saveCase() {
   try {
     for (const p of c.photos) if (!p.saved && p.dataUrl) { await store.put("blobs", p.dataUrl, `${c.id}:${p.id}`); p.saved = true; }
     await store.put("cases", { ...c, photos: c.photos.map(({ id, name, thumb }) => ({ id, name, thumb })) });
+    scheduleSync();
   } catch { /* armazenamento indisponível */ }
 }
 
@@ -1379,7 +1397,7 @@ async function buildReport() {
   const imgs = [];
   for (const p of c.photos || []) {
     let u = p.thumb;
-    try { u = (store && (await store.get("blobs", `${c.id}:${p.id}`))) || p.thumb; } catch { /* usa a miniatura */ }
+    try { u = (await getPhoto(c, p)) || p.thumb; } catch { /* usa a miniatura */ }
     imgs.push(`<img src="${u}" alt="foto de campo" style="max-width:48%;margin:2px;border:1px solid #888">`);
   }
   const fixed = c.status === "corrigido";
@@ -1444,6 +1462,8 @@ async function pingModel() {
 function saveGloss() {
   cfg.glossary = $("glossaryText").value;
   lsSet("hd2.glossary", cfg.glossary);
+  lsSet("hd2.glossaryAt", String(Date.now()));
+  scheduleSync();
   glossary = parseGlossary(cfg.glossary);
   $("glossInfo").textContent = `${glossary.length} grupos ativos`;
   toast("Glossário salvo.");
@@ -1473,6 +1493,226 @@ async function importAll(file) {
   for (const [k, v] of Object.entries(data.blobs || {})) if (v) await store.put("blobs", v, k);
   await renderHistory();
   toast(`${(data.cases || []).length} caso(s) importado(s).`);
+}
+
+/* ============ SINCRONIZAÇÃO NA NUVEM (Supabase) ============ */
+const SB_URL = "https://oooegbbvrwifilavlvgt.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9vb2VnYmJ2cndpZmlsYXZsdmd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAyMTk5NTAsImV4cCI6MjA4NTc5NTk1MH0.x6wDd7c8V3eb1gYgQcEILEBEJKkPfJuF4o2_UuAV7Gk"; // chave pública (anon): a proteção dos dados é feita por RLS no banco
+const SB_BUCKET = "hydrodiag-files";
+const syncMeta = (() => { try { return JSON.parse(lsGet("hd2.sync") || "{}"); } catch { return {}; } })();
+const saveMeta = () => lsSet("hd2.sync", JSON.stringify(syncMeta));
+
+/**
+ * Cria (uma vez) o cliente Supabase, carregado sob demanda.
+ * @returns {Promise<object>} Cliente.
+ */
+async function sbClient() {
+  if (sb) return sb;
+  const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2.45.4");
+  sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: "hd2.sb.auth" } });
+  return sb;
+}
+
+/**
+ * Atualiza o indicador de nuvem no cabeçalho.
+ * @param {string} text Texto.
+ * @param {string} [cls] Classe (ok/warn).
+ */
+function setCloudChip(text, cls = "") { const el = $("cloudChip"); el.textContent = text; el.className = `chip ${cls}`; }
+
+/** Mostra o formulário de login ou o estado conectado. */
+function renderCloud() {
+  $("cloudLogin").classList.toggle("hidden", !!sbUser);
+  $("cloudOn").classList.toggle("hidden", !sbUser);
+  $("cloudWho").textContent = sbUser ? `Conectado: ${sbUser.email}` : "";
+  setCloudChip(sbUser ? "☁ conectado" : "☁ não conectado", sbUser ? "ok" : "");
+}
+
+/** Restaura a sessão salva (se houver) e agenda a sincronização. */
+async function cloudInit() {
+  try { const { data } = await (await sbClient()).auth.getSession(); sbUser = data && data.session ? data.session.user : null; } catch { sbUser = null; }
+  renderCloud();
+  if (sbUser) scheduleSync(600);
+}
+
+/**
+ * Entra (ou cria conta) com e-mail e senha.
+ * @param {boolean} signup Criar conta.
+ */
+async function cloudLogin(signup) {
+  const email = $("cloudEmail").value.trim(), password = $("cloudPass").value;
+  if (!email || password.length < 6) { toast("Informe e-mail e senha (mín. 6 caracteres)."); return; }
+  try {
+    const c = await sbClient();
+    const r = signup ? await c.auth.signUp({ email, password }) : await c.auth.signInWithPassword({ email, password });
+    if (r.error) throw r.error;
+    sbUser = r.data && r.data.session ? r.data.user : null;
+    renderCloud();
+    if (!sbUser) { toast("Conta criada. Confirme o e-mail (link enviado) e depois toque em Entrar.", 9000); return; }
+    toast("Conectado.");
+    await syncNow();
+  } catch (e) { toast(`Nuvem: ${e.message || e}`, 8000); }
+}
+
+/** Sai da conta neste aparelho (os dados locais permanecem). */
+async function cloudLogout() {
+  try { await (await sbClient()).auth.signOut(); } catch { /* ignora */ }
+  sbUser = null;
+  renderCloud();
+}
+
+/**
+ * Agenda uma sincronização (adia se já houver uma em andamento).
+ * @param {number} [ms] Atraso.
+ */
+function scheduleSync(ms = 2500) {
+  if (!sbUser) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => (syncBusy ? scheduleSync(2500) : syncNow()), ms);
+}
+
+/**
+ * Registra uma exclusão para propagar aos outros aparelhos.
+ * @param {"c"|"d"} kind c = caso, d = documento.
+ * @param {string} id Id.
+ */
+function markDeleted(kind, id) {
+  syncMeta.tombs = [...(syncMeta.tombs || []), { t: kind, id }];
+  saveMeta();
+  scheduleSync();
+}
+
+/** @returns {Blob} Blob a partir de um data URL. */
+function dataUrlToBlob(u) {
+  const [h, b] = u.split(",");
+  const bin = atob(b);
+  const a = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return new Blob([a], { type: (h.match(/:(.*?);/) || [])[1] || "image/jpeg" });
+}
+
+/** @returns {Promise<string>} Data URL de um Blob. */
+function blobToDataUrl(b) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); }); }
+
+/**
+ * Foto em tamanho completo: local ou, se faltar, baixada da nuvem (e guardada).
+ * @param {object} c Caso.
+ * @param {object} p Foto.
+ * @returns {Promise<string|null>} Data URL.
+ */
+async function getPhoto(c, p) {
+  const key = `${c.id}:${p.id}`;
+  let u = store ? await store.get("blobs", key) : null;
+  if (!u && sbUser) {
+    try {
+      const dl = await (await sbClient()).storage.from(SB_BUCKET).download(`${sbUser.id}/photos/${c.id}/${p.id}.jpg`);
+      if (dl.data) { u = await blobToDataUrl(dl.data); if (store) await store.put("blobs", u, key); }
+    } catch { /* offline: usa a miniatura */ }
+  }
+  return u || null;
+}
+
+/**
+ * Sincroniza com a nuvem: envia exclusões e alterações locais, depois traz as novidades (vence a edição mais recente).
+ * @returns {Promise<void>}
+ */
+async function syncNow() {
+  if (!sbUser || !store || syncBusy) return;
+  syncBusy = true;
+  setCloudChip("☁ sincronizando…");
+  const must = (r) => { if (r && r.error) throw r.error; return r; };
+  try {
+    const c = await sbClient();
+    const uid = sbUser.id;
+    if (syncMeta.uid !== uid) Object.assign(syncMeta, { uid, pullCases: 0, pullDocs: 0, pushed: {}, photos: {}, docsUp: {}, gloss: 0 });
+    for (const k of ["pushed", "photos", "docsUp"]) syncMeta[k] = syncMeta[k] || {};
+    // 1) exclusões
+    for (const tb of syncMeta.tombs || []) {
+      const now = Date.now();
+      if (tb.t === "c") must(await c.from("hd_cases").upsert({ user_id: uid, id: tb.id, data: {}, deleted: true, updated_at_ms: now }, { onConflict: "user_id,id" }));
+      else {
+        must(await c.from("hd_docs").upsert({ user_id: uid, id: tb.id, name: "", mime: "", deleted: true, updated_at_ms: now }, { onConflict: "user_id,id" }));
+        await c.storage.from(SB_BUCKET).remove([`${uid}/docs/${tb.id}`]);
+      }
+    }
+    syncMeta.tombs = [];
+    // 2) casos locais -> nuvem (fotos completas vão para o armazenamento)
+    for (const k of await store.all("cases")) {
+      if ((syncMeta.pushed[`c:${k.id}`] || 0) >= k.updatedAt) continue;
+      for (const p of k.photos || []) {
+        const key = `${k.id}:${p.id}`;
+        if (syncMeta.photos[key]) continue;
+        const url = await store.get("blobs", key);
+        if (!url) continue;
+        must(await c.storage.from(SB_BUCKET).upload(`${uid}/photos/${k.id}/${p.id}.jpg`, dataUrlToBlob(url), { upsert: true, contentType: "image/jpeg" }));
+        syncMeta.photos[key] = true;
+      }
+      must(await c.from("hd_cases").upsert({ user_id: uid, id: k.id, title: k.title, status: k.status, data: k, updated_at_ms: k.updatedAt, deleted: false }, { onConflict: "user_id,id" }));
+      syncMeta.pushed[`c:${k.id}`] = k.updatedAt;
+    }
+    // 3) documentos locais -> nuvem (PDF no armazenamento, texto lido na tabela)
+    for (const d of await store.all("docs")) {
+      const ts = d.updatedAt || d.addedAt || 0;
+      if ((syncMeta.pushed[`d:${d.id}`] || 0) >= ts) continue;
+      const path = `${uid}/docs/${d.id}`;
+      if (!syncMeta.docsUp[d.id]) { must(await c.storage.from(SB_BUCKET).upload(path, new Blob([d.bytes], { type: d.mime }), { upsert: true, contentType: d.mime })); syncMeta.docsUp[d.id] = true; }
+      must(await c.from("hd_docs").upsert({ user_id: uid, id: d.id, name: d.name, mime: d.mime, page_count: d.pageCount, text_status: d.textStatus, texts: d.texts, storage_path: path, size_bytes: d.bytes.byteLength, updated_at_ms: ts, deleted: false }, { onConflict: "user_id,id" }));
+      syncMeta.pushed[`d:${d.id}`] = ts;
+    }
+    // 4) glossário local -> nuvem
+    const ga = Number(lsGet("hd2.glossaryAt", "0"));
+    if (ga > (syncMeta.gloss || 0)) { must(await c.from("hd_settings").upsert({ user_id: uid, glossary: cfg.glossary, updated_at_ms: ga }, { onConflict: "user_id" })); syncMeta.gloss = ga; }
+    // 5) nuvem -> local: casos
+    const pc = must(await c.from("hd_cases").select("*").gt("updated_at_ms", syncMeta.pullCases || 0).order("updated_at_ms", { ascending: true }));
+    for (const row of pc.data || []) {
+      const local = await store.get("cases", row.id);
+      if (row.deleted) { if (local) { await store.del("cases", row.id); if (state.caseRec && state.caseRec.id === row.id) newDiagnosis(); } }
+      else if (!local || row.updated_at_ms > local.updatedAt) {
+        const rec = { ...row.data, id: row.id, updatedAt: row.updated_at_ms };
+        await store.put("cases", rec);
+        for (const p of rec.photos || []) syncMeta.photos[`${row.id}:${p.id}`] = true;
+      }
+      syncMeta.pushed[`c:${row.id}`] = Math.max(syncMeta.pushed[`c:${row.id}`] || 0, row.updated_at_ms);
+      syncMeta.pullCases = Math.max(syncMeta.pullCases || 0, row.updated_at_ms);
+    }
+    // 6) nuvem -> local: documentos (baixa o PDF só se este aparelho ainda não o tem)
+    const pd = must(await c.from("hd_docs").select("*").gt("updated_at_ms", syncMeta.pullDocs || 0).order("updated_at_ms", { ascending: true }));
+    for (const row of pd.data || []) {
+      const local = await store.get("docs", row.id);
+      if (row.deleted) { if (local) await store.del("docs", row.id); }
+      else if (!local) {
+        setCloudChip(`☁ baixando ${row.name}…`);
+        const dl = must(await c.storage.from(SB_BUCKET).download(row.storage_path));
+        const bytes = await dl.data.arrayBuffer();
+        await store.put("docs", { id: row.id, name: row.name, mime: row.mime, bytes, pageCount: row.page_count, texts: row.texts, textStatus: row.text_status, addedAt: row.updated_at_ms, updatedAt: row.updated_at_ms });
+        syncMeta.docsUp[row.id] = true;
+      } else if (row.updated_at_ms > (local.updatedAt || 0)) {
+        await store.put("docs", { ...local, texts: row.texts, textStatus: row.text_status, pageCount: row.page_count, updatedAt: row.updated_at_ms });
+      }
+      syncMeta.pushed[`d:${row.id}`] = Math.max(syncMeta.pushed[`d:${row.id}`] || 0, row.updated_at_ms);
+      syncMeta.pullDocs = Math.max(syncMeta.pullDocs || 0, row.updated_at_ms);
+    }
+    // 7) nuvem -> local: glossário
+    const gs = must(await c.from("hd_settings").select("*").maybeSingle());
+    if (gs.data && gs.data.updated_at_ms > Math.max(ga, syncMeta.gloss || 0)) {
+      cfg.glossary = gs.data.glossary || DEFAULT_GLOSSARY;
+      lsSet("hd2.glossary", cfg.glossary);
+      lsSet("hd2.glossaryAt", String(gs.data.updated_at_ms));
+      syncMeta.gloss = gs.data.updated_at_ms;
+      glossary = parseGlossary(cfg.glossary);
+      $("glossaryText").value = cfg.glossary;
+      $("glossInfo").textContent = `${glossary.length} grupos ativos`;
+    }
+    if (!state.docs.some((d) => d.textStatus === "lendo")) { state.docs = await store.all("docs"); renderDocs(); }
+    await renderHistory();
+    setCloudChip(`☁ sincronizado ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`, "ok");
+  } catch (err) {
+    setCloudChip("☁ erro (toque p/ tentar)", "warn");
+    toast(`Sincronização: ${(err && err.message) || err}`, 8000);
+  } finally {
+    saveMeta();
+    syncBusy = false;
+  }
 }
 
 /* ============ NAVEGAÇÃO E EVENTOS ============ */
@@ -1528,7 +1768,7 @@ function bind() {
     if (!d) return;
     if (b.dataset.act === "view") openViewer(d.id, 1);
     else if (b.dataset.act === "reread") await readDocText(d);
-    else if (confirm(`Remover "${d.name}" do aparelho?`)) { state.docs = state.docs.filter((x) => x.id !== d.id); if (store) await store.del("docs", d.id).catch(() => {}); renderDocs(); }
+    else if (confirm(`Remover "${d.name}" do aparelho?`)) { state.docs = state.docs.filter((x) => x.id !== d.id); if (store) await store.del("docs", d.id).catch(() => {}); markDeleted("d", d.id); renderDocs(); }
   };
   const histClick = async (e) => {
     const b = e.target.closest("button[data-case]");
@@ -1536,7 +1776,7 @@ function bind() {
     if (b.dataset.case === "open") { await openCase(b.dataset.id); return; }
     const c = (await store.all("cases")).find((x) => x.id === b.dataset.id);
     if (!c) return;
-    if (b.dataset.case === "del") { if (confirm(`Excluir "${c.title}"?`)) { await store.del("cases", c.id); if (state.caseRec && state.caseRec.id === c.id) newDiagnosis(); renderHistory(); } return; }
+    if (b.dataset.case === "del") { if (confirm(`Excluir "${c.title}"?`)) { await store.del("cases", c.id); markDeleted("c", c.id); if (state.caseRec && state.caseRec.id === c.id) newDiagnosis(); renderHistory(); } return; }
     c.status = c.status === "corrigido" ? "aberto" : "corrigido";
     c.correctedAt = c.status === "corrigido" ? Date.now() : null;
     await store.put("cases", c);
@@ -1562,6 +1802,12 @@ function bind() {
   $("stopFab").onclick = requestStop;
   $("vClose").onclick = () => $("viewer").classList.add("hidden");
   $("vNew").onclick = () => { if (viewerUrl) window.open(viewerUrl, "_blank"); };
+  $("cloudIn").onclick = () => cloudLogin(false);
+  $("cloudUp").onclick = () => cloudLogin(true);
+  $("cloudSyncBtn").onclick = syncNow;
+  $("cloudOut").onclick = cloudLogout;
+  $("cloudChip").onclick = () => (sbUser ? syncNow() : showTab("cfg"));
+  window.addEventListener("online", () => scheduleSync(500));
   document.addEventListener("click", onPdfLink);
 }
 
@@ -1570,6 +1816,7 @@ try { store = new Store(); } catch { store = null; }
 bind();
 loadDocs();
 renderHistory();
+cloudInit();
 if (!cfg.key) toast("Cole sua chave do Gemini em Ajustes para começar.", 5000);
 </script>
 </body>
