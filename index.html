@@ -122,6 +122,7 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <p class="mute">Adicione o caderno de projeto (PDF) uma vez: o texto é lido no seu aparelho e guardado. Depois, cada diagnóstico envia ao Gemini só as páginas encontradas.</p>
     <button id="docBtn" class="primary">＋ Adicionar PDF ou imagem</button>
     <input id="docFile" type="file" accept="application/pdf,image/jpeg,image/png" multiple hidden>
+    <input id="textFile" type="file" accept="application/json" hidden>
     <div id="docList" style="display:grid;gap:10px"></div>
   </div>
 </section>
@@ -150,9 +151,15 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <h2>☁️ Sincronização (celular · PC · notebook)</h2>
     <p class="mute">Casos, fotos, PDFs e glossário ficam na sua conta e aparecem em todos os aparelhos em que você entrar. A chave do Gemini nunca sai do aparelho.</p>
     <div id="cloudLogin" style="display:grid;gap:8px">
-      <input id="cloudEmail" type="email" autocomplete="username" placeholder="e-mail">
-      <input id="cloudPass" type="password" autocomplete="current-password" placeholder="senha (mín. 6 caracteres)">
-      <div class="row"><button id="cloudIn" class="primary">Entrar</button><button id="cloudUp">Criar conta</button></div>
+      <button id="cloudGoogle" class="primary">🔐 Entrar com Google</button>
+      <input id="cloudEmail" type="email" autocomplete="username" placeholder="e-mail (para link ou senha)">
+      <button id="cloudLink">✉️ Receber link de acesso por e-mail</button>
+      <details><summary class="mute">Entrar com senha</summary>
+        <div style="display:grid;gap:8px;margin-top:8px">
+          <input id="cloudPass" type="password" autocomplete="current-password" placeholder="senha (mín. 6 caracteres)">
+          <div class="row"><button id="cloudIn">Entrar</button><button id="cloudUp">Criar conta</button></div>
+        </div>
+      </details>
     </div>
     <div id="cloudOn" class="hidden" style="display:grid;gap:8px">
       <strong id="cloudWho"></strong>
@@ -727,7 +734,7 @@ const cfg = {
 let glossary = parseGlossary(cfg.glossary);
 const state = { docs: [], contents: [], turns: [], caseRec: null, photos: [], chatPhotos: [], focus: "" };
 let lastGateway = null, store = null, viewerUrl = "", recog = null;
-let sb = null, sbUser = null, syncBusy = false, syncTimer = null;
+let sb = null, sbUser = null, syncBusy = false, syncTimer = null, importTarget = null;
 
 const FIELD_NOTE = "\n\nFoto(s) de campo anexada(s): descreva o que é visível no painel/equipamento (TAGs, bandeirolas, LEDs, posição de chaves e disjuntores) e relacione com os desenhos. Não afirme estados que não estejam visíveis.";
 const FOCUS = {
@@ -841,6 +848,9 @@ async function extractTexts(bytes, onProgress) {
   return texts;
 }
 
+/** Esqueleto para tolerar confusões típicas de OCR (O/0, I/l/1, S/5, B/8) ao comparar TAGs. */
+const skel = (s) => s.replace(/o/g, "0").replace(/[il]/g, "1").replace(/s/g, "5").replace(/b/g, "8");
+
 /**
  * Conceitos de TAGs com letras e separador (ex.: XF:16, X8:1) encontrados na consulta.
  * @param {string} query Consulta.
@@ -866,14 +876,15 @@ function rankPages(doc, query, limit = 6) {
   const rows = [];
   doc.texts.forEach((t, i) => {
     const txt = norm(t);
+    const sk = doc.ocr ? skel(txt) : null;
     let sc = 0, at = -1, tagHit = false;
     for (const c of concepts) {
-      const hit = c.find((v) => hasTerm(txt, v));
-      if (!hit) continue;
       const isTag = tags.includes(c);
+      const hit = c.find((v) => hasTerm(txt, v)) || (sk && isTag ? c.find((v) => sk.includes(skel(v))) : null);
+      if (!hit) continue;
       if (isTag) tagHit = true;
       sc += (isTag ? 2 : 1) + Math.min(3, txt.split(hit).length - 1) * 0.2;
-      if (at < 0) at = txt.indexOf(hit);
+      if (at < 0) at = Math.max(0, txt.indexOf(hit));
     }
     if (sc > 0) rows.push({ page: i + 1, sc, tagHit, snip: t.slice(Math.max(0, at - 40), at + 90).trim() });
   });
@@ -928,6 +939,29 @@ async function addDocFiles(files) {
 }
 
 /**
+ * Importa o texto de um PDF (JSON com uma string por página, gerado por OCR) para o documento escolhido.
+ * @param {File} file Arquivo JSON {app:"hydrodiag-text", texts:[...], ocr:true}.
+ * @returns {Promise<void>}
+ */
+async function importDocText(file) {
+  const d = importTarget;
+  importTarget = null;
+  if (!d) return;
+  const data = JSON.parse(await file.text());
+  if (data.app !== "hydrodiag-text" || !Array.isArray(data.texts)) throw new Error("Arquivo de texto inválido.");
+  if (data.texts.length !== d.pageCount) throw new Error(`O texto tem ${data.texts.length} páginas e o PDF tem ${d.pageCount}.`);
+  d.texts = data.texts;
+  d.ocr = !!data.ocr;
+  d.chars = data.texts.reduce((a, s) => a + s.length, 0);
+  d.textStatus = "ok";
+  d.updatedAt = Date.now();
+  if (store) await store.put("docs", d).catch(() => {});
+  renderDocs();
+  scheduleSync();
+  toast("Texto importado: a busca local está ativa.");
+}
+
+/**
  * Lê o texto do PDF (uma vez) e classifica: ok, sem-texto ou erro.
  * @param {object} doc Documento.
  * @returns {Promise<void>}
@@ -938,6 +972,7 @@ async function readDocText(doc) {
   try {
     doc.texts = await extractTexts(doc.bytes, (i, n) => { const el = $("docProg-" + doc.id); if (el) el.textContent = `lendo texto ${i}/${n}…`; });
     const chars = doc.texts.reduce((a, t) => a + t.length, 0);
+    doc.chars = chars;
     doc.textStatus = chars / Math.max(1, doc.texts.length) < 15 ? "sem-texto" : "ok";
   } catch (e) { doc.textStatus = "erro"; doc.textError = e.message; }
   doc.updatedAt = Date.now();
@@ -950,8 +985,8 @@ async function readDocText(doc) {
 function renderDocs() {
   $("docList").innerHTML = state.docs.map((d) => {
     const pdf = d.mime === "application/pdf";
-    const st = !pdf ? "imagem" : d.textStatus === "ok" ? `✔ texto lido (${d.pageCount} págs.)` : d.textStatus === "lendo" ? `<span id="docProg-${d.id}">lendo texto…</span>` : d.textStatus === "sem-texto" ? "⚠ sem texto pesquisável (use Páginas extras)" : d.textStatus === "erro" ? `⚠ ${esc(d.textError || "erro")}` : "pendente";
-    return `<div class="item"><div><strong>${esc(d.name)}</strong><br><span class="mute">${(d.bytes.byteLength / 1048576).toFixed(1)} MB · ${d.pageCount} pág. · ${st}</span></div><div class="row"><button data-act="view" data-id="${d.id}" aria-label="Ver">👁</button>${pdf ? `<button data-act="reread" data-id="${d.id}" aria-label="Reler texto">🔄</button>` : ""}<button data-act="del" data-id="${d.id}" aria-label="Remover">🗑</button></div></div>`;
+    const st = !pdf ? "imagem" : d.textStatus === "ok" ? `✔ texto lido${d.ocr ? " (OCR)" : ""} (${d.pageCount} págs.)` : d.textStatus === "lendo" ? `<span id="docProg-${d.id}">lendo texto…</span>` : d.textStatus === "sem-texto" ? `⚠ sem texto pesquisável (${d.chars || 0} caracteres em ${d.pageCount} págs.) — importe o texto (📥) ou use Páginas extras` : d.textStatus === "erro" ? `⚠ ${esc(d.textError || "erro")}` : "pendente";
+    return `<div class="item"><div><strong>${esc(d.name)}</strong><br><span class="mute">${(d.bytes.byteLength / 1048576).toFixed(1)} MB · ${d.pageCount} pág. · ${st}</span></div><div class="row"><button data-act="view" data-id="${d.id}" aria-label="Ver">👁</button>${pdf ? `<button data-act="import" data-id="${d.id}" aria-label="Importar texto (OCR)" title="Importar texto (JSON)">📥</button><button data-act="reread" data-id="${d.id}" aria-label="Reler texto">🔄</button>` : ""}<button data-act="del" data-id="${d.id}" aria-label="Remover">🗑</button></div></div>`;
   }).join("") || '<p class="mute">Nenhum documento ainda.</p>';
   refreshChips();
 }
@@ -1509,7 +1544,7 @@ const saveMeta = () => lsSet("hd2.sync", JSON.stringify(syncMeta));
 async function sbClient() {
   if (sb) return sb;
   const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2.45.4");
-  sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: "hd2.sb.auth" } });
+  sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "implicit", storageKey: "hd2.sb.auth" } });
   return sb;
 }
 
@@ -1530,7 +1565,19 @@ function renderCloud() {
 
 /** Restaura a sessão salva (se houver) e agenda a sincronização. */
 async function cloudInit() {
-  try { const { data } = await (await sbClient()).auth.getSession(); sbUser = data && data.session ? data.session.user : null; } catch { sbUser = null; }
+  try {
+    const c = await sbClient();
+    const { data } = await c.auth.getSession();
+    sbUser = data && data.session ? data.session.user : null;
+    if (c.auth.onAuthStateChange) {
+      c.auth.onAuthStateChange((ev, session) => {
+        const was = sbUser && sbUser.id;
+        sbUser = session ? session.user : null;
+        renderCloud();
+        if (sbUser && sbUser.id !== was) { toast("Conectado."); scheduleSync(600); }
+      });
+    }
+  } catch { sbUser = null; }
   renderCloud();
   if (sbUser) scheduleSync(600);
 }
@@ -1551,6 +1598,25 @@ async function cloudLogin(signup) {
     if (!sbUser) { toast("Conta criada. Confirme o e-mail (link enviado) e depois toque em Entrar.", 9000); return; }
     toast("Conectado.");
     await syncNow();
+  } catch (e) { toast(`Nuvem: ${e.message || e}`, 8000); }
+}
+
+/** Entra com a conta Google (volta para este endereço depois do login). */
+async function cloudGoogle() {
+  try {
+    const r = await (await sbClient()).auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.origin + location.pathname } });
+    if (r.error) throw r.error;
+  } catch (e) { toast(`Google: ${e.message || e}`, 8000); }
+}
+
+/** Envia por e-mail um link de acesso (sem senha). */
+async function cloudMagicLink() {
+  const email = $("cloudEmail").value.trim();
+  if (!email) { toast("Informe o e-mail."); return; }
+  try {
+    const r = await (await sbClient()).auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+    if (r.error) throw r.error;
+    toast("Link enviado. Abra o e-mail neste aparelho e toque no link.", 9000);
   } catch (e) { toast(`Nuvem: ${e.message || e}`, 8000); }
 }
 
@@ -1759,6 +1825,7 @@ function bind() {
   $("chatIn").onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendChat(); };
   $("chatAuto").checked = cfg.autoRead;
   $("chatAuto").onchange = (e) => { cfg.autoRead = e.target.checked; lsSet("hd2.autoRead", cfg.autoRead ? "1" : "0"); };
+  $("textFile").onchange = async (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) { try { await importDocText(f); } catch (err) { toast(`Erro: ${err.message}`, 6000); } } };
   $("docBtn").onclick = () => $("docFile").click();
   $("docFile").onchange = async (e) => { const f = [...e.target.files]; e.target.value = ""; await addDocFiles(f); };
   $("docList").onclick = async (e) => {
@@ -1768,6 +1835,7 @@ function bind() {
     if (!d) return;
     if (b.dataset.act === "view") openViewer(d.id, 1);
     else if (b.dataset.act === "reread") await readDocText(d);
+    else if (b.dataset.act === "import") { importTarget = d; $("textFile").click(); }
     else if (confirm(`Remover "${d.name}" do aparelho?`)) { state.docs = state.docs.filter((x) => x.id !== d.id); if (store) await store.del("docs", d.id).catch(() => {}); markDeleted("d", d.id); renderDocs(); }
   };
   const histClick = async (e) => {
@@ -1802,6 +1870,8 @@ function bind() {
   $("stopFab").onclick = requestStop;
   $("vClose").onclick = () => $("viewer").classList.add("hidden");
   $("vNew").onclick = () => { if (viewerUrl) window.open(viewerUrl, "_blank"); };
+  $("cloudGoogle").onclick = cloudGoogle;
+  $("cloudLink").onclick = cloudMagicLink;
   $("cloudIn").onclick = () => cloudLogin(false);
   $("cloudUp").onclick = () => cloudLogin(true);
   $("cloudSyncBtn").onclick = syncNow;
