@@ -42,6 +42,8 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 .md a{color:var(--accent)}.md table{border-collapse:collapse;display:block;overflow-x:auto}.md th,.md td{border:1px solid var(--line);padding:5px 9px;font-size:13px;text-align:left}
 .thumbs{display:flex;gap:8px;flex-wrap:wrap}.thumb{position:relative}.thumb img{width:72px;height:72px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
 .thumb button{position:absolute;top:-8px;right:-8px;min-height:26px;padding:0 7px;border-radius:99px}
+.menuwrap{position:relative}.menu{position:absolute;bottom:calc(100% + 6px);left:0;z-index:40;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px;display:grid;gap:2px;min-width:240px;box-shadow:0 8px 24px #0008}
+.menu button{text-align:left;border:0;background:none;min-height:46px}.menu button:hover{background:var(--card2)}
 .chat{display:grid;gap:8px;max-height:48vh;overflow:auto}.msg{padding:10px 12px;border-radius:12px;background:var(--card2)}.msg.me{background:var(--accent);color:#1a1200;justify-self:end;max-width:88%;white-space:pre-wrap}
 .item{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
 .item.col1{flex-direction:column;align-items:stretch}.item p{margin:2px 0}
@@ -99,11 +101,21 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <h2>💬 Chat de investigação</h2>
     <div id="chatLog" class="chat"></div>
     <div id="chatThumbs" class="thumbs"></div>
-    <textarea id="chatIn" placeholder="Pergunte, fale ou anexe uma foto…"></textarea>
+    <textarea id="chatIn" placeholder="Pergunte, fale ou anexe foto/arquivo…"></textarea>
     <div class="row">
-      <button id="chatMic">🎤</button><button id="chatPhotoBtn">📷</button>
+      <button id="chatMic" aria-label="Falar">🎤</button>
+      <div id="attachWrap" class="menuwrap">
+        <button id="attachBtn" aria-haspopup="true" aria-expanded="false">📎 Anexar ▾</button>
+        <div id="attachMenu" class="menu hidden" role="menu">
+          <button role="menuitem" data-att="cam">📷 Tirar foto</button>
+          <button role="menuitem" data-att="gal">🖼 Foto da galeria</button>
+          <button role="menuitem" data-att="file">📄 Arquivo (PDF ou imagem)</button>
+        </div>
+      </div>
       <input id="chatPhotoIn" type="file" accept="image/*" capture="environment" multiple hidden>
-      <input id="chatPages" class="grow" placeholder="Páginas do PDF (opcional)" aria-label="Páginas para o chat">
+      <input id="chatGalIn" type="file" accept="image/*" multiple hidden>
+      <input id="chatFileIn" type="file" accept="application/pdf,image/jpeg,image/png" multiple hidden>
+      <input id="chatPages" class="grow" placeholder="Páginas do arquivo (ex.: 3-4)" aria-label="Páginas para o chat">
       <button id="chatSend" class="primary">➤ Enviar</button>
     </div>
     <label class="chk"><input type="checkbox" id="chatAuto"> Ler respostas em voz alta</label>
@@ -144,6 +156,7 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <label class="mute" for="cfgModel">Modelo</label>
     <input id="cfgModel" type="text" placeholder="gemini-flash-latest">
     <div class="row"><button id="cfgSave" class="primary">Salvar</button><button id="cfgDetect">Detectar modelos</button><button id="cfgPing">🩺 Testar conexão</button></div>
+    <label class="chk"><input type="checkbox" id="cfgOcr"> 🔍 OCR automático em PDFs sem texto (mantenha a aba aberta)</label>
     <label class="mute" for="cfgTheme">Tema</label>
     <select id="cfgTheme"><option value="dark">Escuro</option><option value="light">Claro (ao sol)</option></select>
   </div>
@@ -729,10 +742,11 @@ const cfg = {
   fallbacks: (() => { try { return JSON.parse(lsGet("hd2.fallbacks") || lsGet("hydrodiag.fallbacks.v2") || "[]"); } catch { return []; } })(),
   theme: lsGet("hd2.theme", "dark"),
   autoRead: lsGet("hd2.autoRead") === "1",
+  ocrAuto: lsGet("hd2.ocrAuto", "1") === "1",
   glossary: lsGet("hd2.glossary") || lsGet("hydrodiag.glossary") || DEFAULT_GLOSSARY
 };
 let glossary = parseGlossary(cfg.glossary);
-const state = { docs: [], contents: [], turns: [], caseRec: null, photos: [], chatPhotos: [], focus: "" };
+const state = { docs: [], contents: [], turns: [], caseRec: null, photos: [], chatPhotos: [], chatFiles: [], focus: "" };
 let lastGateway = null, store = null, viewerUrl = "", recog = null;
 let sb = null, sbUser = null, syncBusy = false, syncTimer = null, importTarget = null;
 
@@ -760,12 +774,10 @@ class Store {
   /** Abre (ou cria) o banco local. */
   constructor() {
     this.dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("hydrodiag2", 1);
+      const r = indexedDB.open("hydrodiag2", 2);
       r.onupgradeneeded = () => {
         const db = r.result;
-        db.createObjectStore("docs", { keyPath: "id" });
-        db.createObjectStore("cases", { keyPath: "id" });
-        db.createObjectStore("blobs");
+        for (const n of ["docs", "cases", "blobs", "ocr"]) if (!db.objectStoreNames.contains(n)) db.createObjectStore(n, n === "docs" || n === "cases" ? { keyPath: "id" } : undefined);
       };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -907,6 +919,7 @@ function planSources(query) {
     const pages = [...new Set([...hits.map((h) => h.page), ...ex])].sort((a, b) => a - b).slice(0, 12);
     if (pages.length) plan.push({ doc: d, pages, hits });
     else if (d.textStatus === "sem-texto") notes.push(`"${d.name}" não tem texto pesquisável: informe as páginas em "Páginas extras".`);
+    else if (d.textStatus === "ocr" || d.textStatus === "ocr-pausado") notes.push(`O OCR de "${d.name}" ainda não terminou (a busca é parcial): aguarde ou informe as páginas em "Páginas extras".`);
   });
   state.docs.filter((d) => d.mime !== "application/pdf").forEach((d) => plan.push({ doc: d, pages: [1], hits: [] }));
   return { plan, notes };
@@ -917,25 +930,180 @@ function planSources(query) {
 async function loadDocs() {
   try { state.docs = store ? await store.all("docs") : []; } catch { state.docs = []; }
   renderDocs();
+  for (const d of state.docs) if (d.textStatus === "ocr" && d.ocrBy === DEVICE_ID && cfg.ocrAuto) startOcr(d);
 }
 
 /**
  * Adiciona arquivos (PDF/imagem), guarda no aparelho e lê o texto dos PDFs.
  * @param {FileList|File[]} files Arquivos.
- * @returns {Promise<void>}
+ * @returns {Promise<object[]>} Documentos adicionados.
  */
 async function addDocFiles(files) {
+  const added = [];
   for (const f of files) {
     const mime = resolveMime(f);
     if (!/^(application\/pdf|image\/(jpeg|png))$/.test(mime)) { toast(`Tipo não suportado: ${f.name}`); continue; }
     const bytes = await f.arrayBuffer();
     const doc = { id: uid(), name: f.name, mime, bytes, pageCount: mime === "application/pdf" ? await countPages(bytes) : 1, texts: null, textStatus: mime === "application/pdf" ? "pendente" : "imagem", addedAt: Date.now(), updatedAt: Date.now() };
     state.docs.push(doc);
+    added.push(doc);
     if (store) await store.put("docs", doc).catch(() => {});
     renderDocs();
     scheduleSync();
     if (mime === "application/pdf") await readDocText(doc);
   }
+  return added;
+}
+
+/* ============ OCR NO APARELHO (PDFs só com desenho vetorial) ============ */
+const TESS_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+const OCR_DPI = IS_MOBILE ? 220 : 300;
+const OCR_WORKERS = IS_MOBILE ? 1 : Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
+const DEVICE_ID = (() => { let id = lsGet("hd2.device"); if (!id) { id = uid(); lsSet("hd2.device", id); } return id; })();
+let tessReady = null, ocrRunning = null;
+const ocrQueue = [], ocrCancel = new Set();
+
+/**
+ * Carrega o tesseract.js (OCR) sob demanda.
+ * @returns {Promise<object>} Biblioteca Tesseract.
+ */
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (!tessReady) {
+    tessReady = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = TESS_URL;
+      s.onload = () => res(window.Tesseract);
+      s.onerror = () => { tessReady = null; rej(new Error("Não foi possível carregar o OCR (tesseract.js). Verifique a internet.")); };
+      document.head.append(s);
+    });
+  }
+  return tessReady;
+}
+
+/** Grava o documento no armazenamento local. */
+async function persistDoc(doc) { if (store && state.docs.includes(doc)) await store.put("docs", doc).catch(() => {}); }
+
+/**
+ * Coloca o PDF na fila de OCR (um por vez) e inicia.
+ * @param {object} doc Documento.
+ */
+function startOcr(doc) {
+  if (!doc || (doc.textStatus === "ok" && doc.texts)) return;
+  doc.textStatus = "ocr";
+  doc.ocrBy = DEVICE_ID;
+  if (!ocrQueue.includes(doc.id) && ocrRunning !== doc.id) ocrQueue.push(doc.id);
+  renderDocs();
+  pumpOcr();
+}
+
+/**
+ * Pausa o OCR do documento (o progresso fica salvo).
+ * @param {object} doc Documento.
+ */
+function pauseOcr(doc) {
+  ocrCancel.add(doc.id);
+  const i = ocrQueue.indexOf(doc.id);
+  if (i >= 0) { ocrQueue.splice(i, 1); doc.textStatus = "ocr-pausado"; renderDocs(); }
+}
+
+/** Processa a fila de OCR, um documento por vez. */
+async function pumpOcr() {
+  if (ocrRunning || !ocrQueue.length) return;
+  const doc = state.docs.find((d) => d.id === ocrQueue.shift());
+  if (!doc) { pumpOcr(); return; }
+  ocrRunning = doc.id;
+  try { await ocrDoc(doc); }
+  catch (e) { doc.textStatus = "erro"; doc.textError = `OCR: ${e.message}`; await persistDoc(doc); }
+  finally { ocrRunning = null; ocrCancel.delete(doc.id); renderDocs(); pumpOcr(); }
+}
+
+/**
+ * Faz OCR de todas as páginas (renderiza com pdf.js e lê com tesseract.js), com retomada e progresso salvo a cada 5 páginas.
+ * @param {object} doc Documento PDF.
+ * @returns {Promise<void>}
+ */
+async function ocrDoc(doc) {
+  const [lib, T] = await Promise.all([loadPdfJs(), loadTesseract()]);
+  const pdf = await lib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)) }).promise;
+  const n = pdf.numPages;
+  let saved = null;
+  try { saved = store ? await store.get("ocr", doc.id) : null; } catch { saved = null; }
+  const cand = [doc.ocrTexts, saved && saved.texts].filter((arr) => arr && arr.length === n);
+  cand.sort((x, y) => y.filter((v) => v !== null).length - x.filter((v) => v !== null).length);
+  doc.ocrTexts = cand[0] || new Array(n).fill(null);
+  doc.texts = doc.ocrTexts.map((s) => s || "");
+  doc.textStatus = "ocr";
+  doc.ocrBy = DEVICE_ID;
+  ocrCancel.delete(doc.id);
+  await persistDoc(doc);
+  const t0 = Date.now();
+  let doneNow = 0, next = 0;
+  const count = () => doc.ocrTexts.filter((s) => s !== null).length;
+  const show = () => {
+    const d = count();
+    const eta = doneNow ? Math.max(1, Math.round((((Date.now() - t0) / doneNow) * (n - d)) / 60000)) : null;
+    const msg = `OCR ${d}/${n}${eta ? ` · ~${eta} min` : ""}`;
+    const el = $("docProg-" + doc.id);
+    if (el) el.textContent = msg;
+    $("docChip").textContent = `🔍 ${msg}`;
+  };
+  let wake = null;
+  try { wake = navigator.wakeLock ? await navigator.wakeLock.request("screen") : null; } catch { wake = null; }
+  const workers = [];
+  try {
+    for (let k = 0; k < OCR_WORKERS; k++) {
+      const w = await T.createWorker("eng");
+      await w.setParameters({ tessedit_pageseg_mode: "11", user_defined_dpi: String(OCR_DPI) });
+      workers.push(w);
+    }
+    show();
+    const run = async (w) => {
+      while (!ocrCancel.has(doc.id)) {
+        const i = next++;
+        if (i >= n) break;
+        if (doc.ocrTexts[i] !== null) continue;
+        try {
+          const page = await pdf.getPage(i + 1);
+          const vp = page.getViewport({ scale: OCR_DPI / 72 });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(vp.width);
+          canvas.height = Math.ceil(vp.height);
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          const { data } = await w.recognize(canvas);
+          canvas.width = 0;
+          canvas.height = 0;
+          doc.ocrTexts[i] = (data.text || "").replace(/\s+/g, " ").trim();
+        } catch { doc.ocrTexts[i] = ""; }
+        doc.texts = doc.ocrTexts.map((s) => s || "");
+        doneNow++;
+        show();
+        if (store && doneNow % 5 === 0) await store.put("ocr", { texts: doc.ocrTexts }, doc.id).catch(() => {});
+      }
+    };
+    await Promise.all(workers.map(run));
+  } finally {
+    await Promise.all(workers.map((w) => Promise.resolve(w.terminate()).catch(() => {})));
+    if (wake) wake.release().catch(() => {});
+  }
+  if (!state.docs.includes(doc)) return;
+  if (store) await store.put("ocr", { texts: doc.ocrTexts }, doc.id).catch(() => {});
+  if (count() < n) { doc.textStatus = "ocr-pausado"; await persistDoc(doc); renderDocs(); return; }
+  const chars = doc.ocrTexts.reduce((a, s) => a + s.length, 0);
+  doc.texts = doc.ocrTexts;
+  doc.ocr = true;
+  doc.chars = chars;
+  doc.textStatus = chars / n < 15 ? "sem-texto" : "ok";
+  delete doc.ocrTexts;
+  doc.updatedAt = Date.now();
+  await persistDoc(doc);
+  if (store) await store.del("ocr", doc.id).catch(() => {});
+  scheduleSync();
+  toast(doc.textStatus === "ok" ? `OCR concluído: busca local ativa em "${doc.name}".` : "O OCR não encontrou texto neste PDF.", 7000);
 }
 
 /**
@@ -979,14 +1147,15 @@ async function readDocText(doc) {
   if (store) await store.put("docs", doc).catch(() => {});
   scheduleSync();
   renderDocs();
+  if (doc.textStatus === "sem-texto" && cfg.ocrAuto && doc.pageCount > 12) startOcr(doc);
 }
 
 /** Redesenha a lista de documentos e o indicador do cabeçalho. */
 function renderDocs() {
   $("docList").innerHTML = state.docs.map((d) => {
     const pdf = d.mime === "application/pdf";
-    const st = !pdf ? "imagem" : d.textStatus === "ok" ? `✔ texto lido${d.ocr ? " (OCR)" : ""} (${d.pageCount} págs.)` : d.textStatus === "lendo" ? `<span id="docProg-${d.id}">lendo texto…</span>` : d.textStatus === "sem-texto" ? `⚠ sem texto pesquisável (${d.chars || 0} caracteres em ${d.pageCount} págs.) — importe o texto (📥) ou use Páginas extras` : d.textStatus === "erro" ? `⚠ ${esc(d.textError || "erro")}` : "pendente";
-    return `<div class="item"><div><strong>${esc(d.name)}</strong><br><span class="mute">${(d.bytes.byteLength / 1048576).toFixed(1)} MB · ${d.pageCount} pág. · ${st}</span></div><div class="row"><button data-act="view" data-id="${d.id}" aria-label="Ver">👁</button>${pdf ? `<button data-act="import" data-id="${d.id}" aria-label="Importar texto (OCR)" title="Importar texto (JSON)">📥</button><button data-act="reread" data-id="${d.id}" aria-label="Reler texto">🔄</button>` : ""}<button data-act="del" data-id="${d.id}" aria-label="Remover">🗑</button></div></div>`;
+    const st = !pdf ? "imagem" : d.textStatus === "ok" ? `✔ texto lido${d.ocr ? " (OCR)" : ""} (${d.pageCount} págs.)` : d.textStatus === "lendo" ? `<span id="docProg-${d.id}">lendo texto…</span>` : d.textStatus === "ocr" && d.ocrBy === DEVICE_ID ? `🔍 <span id="docProg-${d.id}">OCR iniciando…</span> (mantenha a aba aberta)` : d.textStatus === "ocr" ? "🔍 OCR em andamento em outro aparelho" : d.textStatus === "ocr-pausado" ? "⏸ OCR pausado (toque em 🔍 para continuar)" : d.textStatus === "sem-texto" ? `⚠ sem texto pesquisável (${d.chars || 0} caracteres em ${d.pageCount} págs.) — importe o texto (📥) ou use Páginas extras` : d.textStatus === "erro" ? `⚠ ${esc(d.textError || "erro")}` : "pendente";
+    return `<div class="item"><div><strong>${esc(d.name)}</strong><br><span class="mute">${(d.bytes.byteLength / 1048576).toFixed(1)} MB · ${d.pageCount} pág. · ${st}</span></div><div class="row"><button data-act="view" data-id="${d.id}" aria-label="Ver">👁</button>${pdf && d.textStatus === "ocr" && d.ocrBy === DEVICE_ID ? `<button data-act="ocrpause" data-id="${d.id}" aria-label="Pausar OCR">⏸</button>` : ""}${pdf && (["sem-texto", "erro", "ocr-pausado"].includes(d.textStatus) || (d.textStatus === "ocr" && d.ocrBy !== DEVICE_ID)) ? `<button data-act="ocr" data-id="${d.id}" aria-label="Fazer OCR neste aparelho" title="Fazer OCR neste aparelho">🔍</button>` : ""}${pdf ? `<button data-act="import" data-id="${d.id}" aria-label="Importar texto (JSON)" title="Importar texto (JSON)">📥</button>` : ""}${pdf && d.textStatus !== "ocr" ? `<button data-act="reread" data-id="${d.id}" aria-label="Reler texto">🔄</button>` : ""}<button data-act="del" data-id="${d.id}" aria-label="Remover">🗑</button></div></div>`;
   }).join("") || '<p class="mute">Nenhum documento ainda.</p>';
   refreshChips();
 }
@@ -1253,6 +1422,7 @@ function newDiagnosis() {
   Object.assign(state, { contents: [], turns: [], caseRec: null, focus: "" });
   state.photos.length = 0;
   state.chatPhotos.length = 0;
+  state.chatFiles.length = 0;
   ["query", "extraPages", "chatIn", "chatPages"].forEach((id) => ($(id).value = ""));
   ["photoThumbs", "chatThumbs", "chatLog", "answer", "pagesUsed"].forEach((id) => ($(id).innerHTML = ""));
   ["resultCard", "chatCard"].forEach((id) => $(id).classList.add("hidden"));
@@ -1374,23 +1544,54 @@ function addMsg(who, text) {
   return d;
 }
 
-/** Envia pergunta, fotos e/ou páginas extras ao chat, mantendo o contexto da falha. */
+/** Desenha as fotos e os arquivos anexados ao chat (com botão de remover). */
+function renderChatAttach() {
+  const ph = state.chatPhotos.map((p) => `<div class="thumb"><img src="${p.thumb}" alt="${esc(p.name)}"><button data-kind="photo" data-id="${p.id}" aria-label="Remover foto">✕</button></div>`).join("");
+  const fl = state.chatFiles.map((f) => `<span class="chip">📄 ${esc(f.name)} <button data-kind="file" data-id="${f.id}" aria-label="Remover arquivo" style="min-height:22px;padding:0 6px;border-radius:99px">✕</button></span>`).join("");
+  $("chatThumbs").innerHTML = ph + fl;
+}
+
+/**
+ * Anexa ao chat: imagens viram fotos; PDFs entram nos documentos (salvos, lidos e sincronizados) e seguem na próxima mensagem.
+ * @param {FileList|File[]} files Arquivos escolhidos.
+ */
+async function attachToChat(files) {
+  for (const f of [...files]) {
+    if (/^image\//.test(resolveMime(f))) { try { state.chatPhotos.push(await shrinkImage(f)); } catch { toast("Não consegui ler a imagem."); } }
+    else for (const d of await addDocFiles([f])) state.chatFiles.push({ id: d.id, name: d.name });
+    renderChatAttach();
+  }
+}
+
+/** Envia pergunta, fotos, arquivos e/ou páginas ao chat, mantendo o contexto da falha. */
 async function sendChat() {
   const text = $("chatIn").value.trim();
   const pg = $("chatPages").value.trim();
   const photos = [...state.chatPhotos];
-  if (!text && !photos.length && !pg) return;
+  const files = [...state.chatFiles];
+  if (!text && !photos.length && !pg && !files.length) return;
   if (!state.caseRec) { toast("Faça um diagnóstico primeiro."); return; }
   const q = text || "Analise os anexos no contexto da falha em investigação.";
-  addMsg("me", `${photos.length ? `📷 ${photos.length} foto(s)\n` : ""}${pg ? `📄 págs. ${pg}\n` : ""}${q}`);
+  addMsg("me", `${photos.length ? `📷 ${photos.length} foto(s)\n` : ""}${files.map((f) => `📄 ${f.name}\n`).join("")}${pg ? `págs. ${pg}\n` : ""}${q}`);
   $("chatIn").value = "";
   const box = addMsg("ai", "…");
   $("chatSend").disabled = true;
   setGenerating(true);
   try {
     const parts = [];
+    const used = [];
+    const attDocs = files.map((f) => state.docs.find((d) => d.id === f.id)).filter(Boolean);
+    for (const d of attDocs) {
+      let pgs = null;
+      if (pg) pgs = parsePages(pg, d.pageCount);
+      else if (d.pageCount <= 12) pgs = Array.from({ length: Math.max(1, d.pageCount) }, (_, i) => i + 1);
+      else if (d.texts) pgs = rankPages(d, q, 6).map((h) => h.page);
+      if (!pgs || !pgs.length) throw new Error(`"${d.name}" tem ${d.pageCount} páginas: informe as páginas desejadas no campo "Páginas do arquivo".`);
+      parts.push(...(await docParts({ ...d, selection: pgs.join(","), next: true })));
+      used.push({ docId: d.id, name: d.name, pages: pgs });
+    }
     const d0 = state.docs.find((d) => d.mime === "application/pdf");
-    const pages = d0 && pg ? parsePages(pg, d0.pageCount) : null;
+    const pages = !attDocs.length && d0 && pg ? parsePages(pg, d0.pageCount) : null;
     if (pages) parts.push(...(await docParts({ ...d0, selection: pages.join(","), next: true })));
     for (const ph of photos) parts.push({ text: `Foto de campo: ${ph.name}` }, { inlineData: { mimeType: "image/jpeg", data: ph.dataUrl.split(",")[1] } });
     state.contents.push({ role: "user", parts: [...parts, { text: q }] });
@@ -1398,8 +1599,13 @@ async function sendChat() {
     state.contents.push({ role: "model", parts: [{ text: answer }] });
     state.turns.push({ role: "user", text: q, kind: "chat" }, { role: "model", text: answer, kind: "chat" });
     state.caseRec.photos.push(...photos.map((p) => ({ ...p, saved: false })));
+    if (used.length) {
+      state.caseRec.pagesUsed = [...(state.caseRec.pagesUsed || []), ...used];
+      $("pagesUsed").innerHTML = state.caseRec.pagesUsed.flatMap((u) => u.pages.map((p) => `<a class="chip" href="#pdf=${u.docId}&p=${p}" title="${esc(u.name)}">📄 pág. ${p}</a>`)).join("");
+    }
     state.chatPhotos.length = 0;
-    renderThumbs(state.chatPhotos, $("chatThumbs"));
+    state.chatFiles.length = 0;
+    renderChatAttach();
     $("chatPages").value = "";
     await saveCase();
     if (cfg.autoRead) speak(answer);
@@ -1769,7 +1975,7 @@ async function syncNow() {
       $("glossaryText").value = cfg.glossary;
       $("glossInfo").textContent = `${glossary.length} grupos ativos`;
     }
-    if (!state.docs.some((d) => d.textStatus === "lendo")) { state.docs = await store.all("docs"); renderDocs(); }
+    if (!ocrRunning && !state.docs.some((d) => d.textStatus === "lendo")) { state.docs = await store.all("docs"); renderDocs(); }
     await renderHistory();
     setCloudChip(`☁ sincronizado ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`, "ok");
   } catch (err) {
@@ -1818,9 +2024,21 @@ function bind() {
   $("newBtn").onclick = newDiagnosis;
   $("newHist").onclick = newDiagnosis;
   $("chatMic").onclick = () => dictate($("chatIn"), $("chatMic"));
-  $("chatPhotoBtn").onclick = () => $("chatPhotoIn").click();
-  $("chatPhotoIn").onchange = async (e) => { await addPhotos(e.target.files, state.chatPhotos, $("chatThumbs")); e.target.value = ""; };
-  $("chatThumbs").onclick = (e) => rmThumb(e, state.chatPhotos, $("chatThumbs"));
+  const menu = $("attachMenu");
+  const closeMenu = () => { menu.classList.add("hidden"); $("attachBtn").setAttribute("aria-expanded", "false"); };
+  $("attachBtn").onclick = (e) => { e.stopPropagation(); const open = menu.classList.toggle("hidden") === false; $("attachBtn").setAttribute("aria-expanded", String(open)); };
+  menu.onclick = (e) => { const b = e.target.closest("button[data-att]"); if (!b) return; closeMenu(); $({ cam: "chatPhotoIn", gal: "chatGalIn", file: "chatFileIn" }[b.dataset.att]).click(); };
+  document.addEventListener("click", (e) => { if (!e.target.closest("#attachWrap")) closeMenu(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  for (const id of ["chatPhotoIn", "chatGalIn", "chatFileIn"]) $(id).onchange = async (e) => { const f = [...e.target.files]; e.target.value = ""; await attachToChat(f); };
+  $("chatThumbs").onclick = (e) => {
+    const b = e.target.closest("button[data-id]");
+    if (!b) return;
+    const list = b.dataset.kind === "file" ? state.chatFiles : state.chatPhotos;
+    const i = list.findIndex((x) => x.id === b.dataset.id);
+    if (i >= 0) list.splice(i, 1);
+    renderChatAttach();
+  };
   $("chatSend").onclick = sendChat;
   $("chatIn").onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendChat(); };
   $("chatAuto").checked = cfg.autoRead;
@@ -1836,7 +2054,9 @@ function bind() {
     if (b.dataset.act === "view") openViewer(d.id, 1);
     else if (b.dataset.act === "reread") await readDocText(d);
     else if (b.dataset.act === "import") { importTarget = d; $("textFile").click(); }
-    else if (confirm(`Remover "${d.name}" do aparelho?`)) { state.docs = state.docs.filter((x) => x.id !== d.id); if (store) await store.del("docs", d.id).catch(() => {}); markDeleted("d", d.id); renderDocs(); }
+    else if (b.dataset.act === "ocr") startOcr(d);
+    else if (b.dataset.act === "ocrpause") pauseOcr(d);
+    else if (confirm(`Remover "${d.name}" do aparelho?`)) { ocrCancel.add(d.id); state.docs = state.docs.filter((x) => x.id !== d.id); if (store) { await store.del("docs", d.id).catch(() => {}); await store.del("ocr", d.id).catch(() => {}); } markDeleted("d", d.id); renderDocs(); }
   };
   const histClick = async (e) => {
     const b = e.target.closest("button[data-case]");
@@ -1860,6 +2080,9 @@ function bind() {
   $("cfgKey").value = cfg.key;
   $("cfgModel").value = cfg.model;
   $("cfgTheme").value = cfg.theme;
+  $("cfgOcr").checked = cfg.ocrAuto;
+  $("cfgOcr").onchange = (e) => { cfg.ocrAuto = e.target.checked; lsSet("hd2.ocrAuto", cfg.ocrAuto ? "1" : "0"); };
+  window.addEventListener("beforeunload", (e) => { if (ocrRunning) { e.preventDefault(); e.returnValue = ""; } });
   $("cfgSave").onclick = saveCfg;
   $("cfgDetect").onclick = detectModels;
   $("cfgPing").onclick = pingModel;
