@@ -5,6 +5,10 @@
 <meta name="robots" content="noindex,nofollow">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f141a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>HydroDiag — Diagnóstico de falhas em PCH/UHE</title>
 <style>
 :root{--bg:#0f141a;--card:#171e27;--card2:#1e2833;--line:#2c3947;--text:#e6edf3;--mute:#9fb0c0;--accent:#f2a623;--ok:#35c28a;--err:#ef5b6e;--r:14px}
@@ -53,12 +57,27 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 #viewer{position:fixed;inset:2vh 2vw;z-index:60;background:var(--card);border:1px solid var(--accent);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden}
 .vbar{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
 #vBody{flex:1;min-height:0}#vBody iframe,#vBody img{width:100%;height:100%;border:0;object-fit:contain;background:#fff}
+.vtool{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line)}
+.vtool button{min-height:46px;min-width:46px;padding:4px 10px}.vtool input{width:70px;text-align:center;padding:8px}
+#vStage{flex:1;min-height:0;overflow:auto;background:#5d6975;touch-action:pan-x pan-y pinch-zoom}
+#vWrap{position:relative;display:inline-block;margin:8px;background:#fff;line-height:0}
+#vWrap canvas,#vWrap img{display:block}
+.hl{position:absolute;border:3px solid #ff3b30;background:#ff3b3040;border-radius:3px;pointer-events:none;box-shadow:0 0 0 2px #fff9}
+.vchk{padding:6px 12px;font-size:14px;border-bottom:1px solid var(--line)}
+#wizard{position:fixed;inset:0;z-index:55;background:var(--bg);display:flex;flex-direction:column}
+.wbody{flex:1;overflow:auto;padding:14px;max-width:760px;width:100%;margin:0 auto;display:grid;gap:12px;align-content:start}
+.wstep{font-size:17px}.vbtn{min-height:54px;font-size:17px}
+.okb{background:var(--ok);border-color:var(--ok);color:#04150d;font-weight:700}.errb{background:var(--err);border-color:var(--err);color:#fff;font-weight:700}
+.sim{border:1px solid var(--accent);border-radius:12px;padding:10px;display:grid;gap:8px;background:#f2a6231a}
+.vbar2{font-size:14px;padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card2)}
+.vb-ok{color:var(--ok);font-weight:600}.vb-w{color:var(--err);font-weight:600}
+@media print{#wizard{display:none!important}}
 </style>
 </head>
 <body>
 <header class="top">
   <div class="brand">⚡ HydroDiag<small>Diagnóstico de falhas · PCH/UHE</small></div>
-  <div class="chips"><span id="docChip" class="chip warn">📄 sem documento</span><span id="caseChip" class="chip">—</span><span id="cloudChip" class="chip" role="button" tabindex="0">☁ não conectado</span></div>
+  <div class="chips"><span id="docChip" class="chip warn">📄 sem documento</span><span id="caseChip" class="chip">—</span><span id="cloudChip" class="chip" role="button" tabindex="0">☁ não conectado</span><span id="netChip" class="chip warn hidden">📴 offline</span></div>
 </header>
 <nav id="tabs" aria-label="Seções">
   <button data-tab="diag" class="on"><b>🔎</b>Diagnóstico</button>
@@ -71,13 +90,14 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 <section id="tab-diag" class="tab">
   <div class="card">
     <h2>🔎 Qual é a falha?</h2>
-    <textarea id="query" placeholder="Digite ou fale o alarme/sintoma. Ex.: UG2 - RV - falha de comunicação"></textarea>
+    <textarea id="query" autocapitalize="off" spellcheck="false" placeholder="Digite ou fale o alarme/sintoma. Ex.: UG2 - RV - falha de comunicação"></textarea>
+    <div id="similar"></div>
     <div id="photoThumbs" class="thumbs"></div>
     <div class="row">
       <button id="micBtn">🎤 Falar</button>
       <button id="photoBtn">📷 Foto</button>
       <input id="photoIn" type="file" accept="image/*" capture="environment" multiple hidden>
-      <input id="extraPages" class="grow" placeholder="Páginas extras (ex.: 37-45)" aria-label="Páginas extras">
+      <input id="extraPages" class="grow" autocapitalize="off" spellcheck="false" placeholder="Páginas extras (ex.: 37-45)" aria-label="Páginas extras">
     </div>
     <div class="row" id="focusRow">
       <button class="chipbtn" data-focus="medir">Onde medir?</button>
@@ -90,10 +110,11 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
   </div>
   <div id="resultCard" class="card hidden">
     <div class="rhead"><h2 id="resTitle">Resultado</h2>
-      <div class="row"><button id="speakBtn">🔊 Ler</button><button id="reportBtn">🧾 Relatório</button><button id="copyBtn">Copiar</button><button id="newBtn">＋ Novo</button></div></div>
+      <div class="row"><button id="guideBtn">🧭 Passo a passo</button><button id="speakBtn">🔊 Ler</button><button id="reportBtn">🧾 Relatório</button><button id="copyBtn">Copiar</button><button id="newBtn">＋ Novo</button></div></div>
     <label class="chk"><input type="checkbox" id="fixedChk"> ✔ Problema corrigido</label>
     <textarea id="fixNote" class="hidden" placeholder="Solução aplicada / observações de campo"></textarea>
     <div class="warn">⚠️ Segurança: desenergize e bloqueie (LOTO) antes de testes de continuidade; siga a NR-10; use multímetro com categoria CAT adequada; medição energizada só por pessoa habilitada. Apoio técnico: confira folha, borne e revisão no desenho oficial.</div>
+    <div id="verifyBar" class="vbar2 hidden"></div>
     <div id="pagesUsed" class="row"></div>
     <div id="answer"></div>
   </div>
@@ -124,7 +145,7 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 
 <section id="tab-hist" class="tab hidden">
   <div class="card"><div class="rhead"><h2>🕘 Últimos 3 problemas</h2><button id="newHist">＋ Novo diagnóstico</button></div>
-    <div id="last3" class="row" style="display:grid;gap:10px"></div></div>
+    <div id="last3" class="row" style="display:grid;gap:10px"></div><p id="stats" class="mute"></p></div>
   <details class="card"><summary><strong>Todos os casos anteriores</strong></summary><div id="allCases" style="display:grid;gap:10px;margin-top:10px"></div></details>
 </section>
 
@@ -159,6 +180,8 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
     <label class="chk"><input type="checkbox" id="cfgOcr"> 🔍 OCR automático em PDFs sem texto (mantenha a aba aberta)</label>
     <label class="mute" for="cfgTheme">Tema</label>
     <select id="cfgTheme"><option value="dark">Escuro</option><option value="light">Claro (ao sol)</option></select>
+    <p class="mute" id="verInfo"></p>
+    <div class="row"><button id="updBtn">⟳ Verificar atualização</button></div>
   </div>
   <div class="card">
     <h2>☁️ Sincronização (celular · PC · notebook)</h2>
@@ -188,7 +211,16 @@ button.rec{background:var(--err);border-color:var(--err);color:#fff}
 </main>
 <button id="stopFab" class="hidden" aria-label="Parar geração">⏹ Parar</button>
 <div id="toast" class="hidden" role="status"></div>
-<div id="viewer" class="hidden"><div class="vbar"><strong id="vTitle"></strong><span class="row"><button id="vNew">Nova aba</button><button id="vClose">✕ Fechar</button></span></div><div id="vBody"></div></div>
+<div id="wizard" class="hidden" role="dialog" aria-label="Passo a passo">
+  <div class="vbar"><strong id="wTitle">🧭 Passo a passo</strong><button id="wClose">✕ Fechar</button></div>
+  <div class="wbody" id="wBody"></div>
+</div>
+<div id="viewer" class="hidden" role="dialog" aria-label="Visualizador de desenho">
+  <div class="vbar"><strong id="vTitle"></strong><span class="row"><button id="vNew">Nova aba</button><button id="vClose">✕ Fechar</button></span></div>
+  <div class="vtool"><button id="vPrev" aria-label="Página anterior">◀</button><input id="vPage" inputmode="numeric" aria-label="Página"><button id="vNext" aria-label="Próxima página">▶</button><button id="vZout" aria-label="Diminuir">−</button><button id="vZin" aria-label="Aumentar">＋</button><button id="vFit" aria-label="Ajustar à largura">⤢</button></div>
+  <div id="vChk" class="vchk hidden"></div>
+  <div id="vStage"><div id="vWrap"></div></div>
+</div>
 
 <script type="module">
 import { GoogleGenAI } from "https://esm.sh/@google/genai@1.0.0";
@@ -1033,6 +1065,7 @@ async function ocrDoc(doc) {
   const cand = [doc.ocrTexts, saved && saved.texts].filter((arr) => arr && arr.length === n);
   cand.sort((x, y) => y.filter((v) => v !== null).length - x.filter((v) => v !== null).length);
   doc.ocrTexts = cand[0] || new Array(n).fill(null);
+  doc.ocrBoxes = saved && saved.boxes && saved.boxes.length === n ? saved.boxes : doc.ocrBoxes && doc.ocrBoxes.length === n ? doc.ocrBoxes : new Array(n).fill(null);
   doc.texts = doc.ocrTexts.map((s) => s || "");
   doc.textStatus = "ocr";
   doc.ocrBy = DEVICE_ID;
@@ -1078,11 +1111,13 @@ async function ocrDoc(doc) {
           canvas.width = 0;
           canvas.height = 0;
           doc.ocrTexts[i] = (data.text || "").replace(/\s+/g, " ").trim();
+          const kk = 72 / OCR_DPI;
+          doc.ocrBoxes[i] = (data.words || []).filter((x) => x.bbox && /\d/.test(x.text) && x.text.length >= 2 && x.text.length <= 24).slice(0, 120).map((x) => [x.text, Math.round(x.bbox.x0 * kk), Math.round(x.bbox.y0 * kk), Math.round(x.bbox.x1 * kk), Math.round(x.bbox.y1 * kk)]);
         } catch { doc.ocrTexts[i] = ""; }
         doc.texts = doc.ocrTexts.map((s) => s || "");
         doneNow++;
         show();
-        if (store && doneNow % 5 === 0) await store.put("ocr", { texts: doc.ocrTexts }, doc.id).catch(() => {});
+        if (store && doneNow % 5 === 0) await store.put("ocr", { texts: doc.ocrTexts, boxes: doc.ocrBoxes }, doc.id).catch(() => {});
       }
     };
     await Promise.all(workers.map(run));
@@ -1091,14 +1126,16 @@ async function ocrDoc(doc) {
     if (wake) wake.release().catch(() => {});
   }
   if (!state.docs.includes(doc)) return;
-  if (store) await store.put("ocr", { texts: doc.ocrTexts }, doc.id).catch(() => {});
+  if (store) await store.put("ocr", { texts: doc.ocrTexts, boxes: doc.ocrBoxes }, doc.id).catch(() => {});
   if (count() < n) { doc.textStatus = "ocr-pausado"; await persistDoc(doc); renderDocs(); return; }
   const chars = doc.ocrTexts.reduce((a, s) => a + s.length, 0);
   doc.texts = doc.ocrTexts;
   doc.ocr = true;
   doc.chars = chars;
   doc.textStatus = chars / n < 15 ? "sem-texto" : "ok";
+  doc.boxes = doc.ocrBoxes;
   delete doc.ocrTexts;
+  delete doc.ocrBoxes;
   doc.updatedAt = Date.now();
   await persistDoc(doc);
   if (store) await store.del("ocr", doc.id).catch(() => {});
@@ -1179,23 +1216,266 @@ async function refreshChips(cases) {
 }
 
 /* ============ VISUALIZADOR E LINKS DE PÁGINA ============ */
+/** TAG "forte": letras + dígitos + separador (: ou .) + dígitos (ex.: XF:16, A70.0, XED:217). */
+const STRONG_TAG = /\b[A-Z]{1,6}\d*[:.]\d+[A-Z0-9]*\b/g;
+const SHEET_CODE = /^(EL|RB|ME|RM|FL)[.:]/;
+const normCache = new WeakMap();
+const pdfCache = new Map();
+const V = { id: null, doc: null, page: 1, zoom: 1, hl: [], busy: 0 };
+
 /**
- * Abre o visualizador na página indicada.
- * @param {string} docId Id do documento.
- * @param {number} [page] Página original.
+ * Texto normalizado de cada página (em cache enquanto o texto não mudar).
+ * @param {object} doc Documento com texts.
+ * @returns {string[]} Páginas normalizadas.
  */
-function openViewer(docId, page = 1) {
-  const d = state.docs.find((x) => x.id === docId);
-  if (!d) { toast("Documento não está mais salvo. Adicione-o em Documentos."); return; }
-  if (!d.url) d.url = URL.createObjectURL(new Blob([d.bytes], { type: d.mime }));
-  viewerUrl = `${d.url}#page=${page}`;
-  $("vTitle").textContent = `${d.name} — pág. ${page}`;
-  $("vBody").innerHTML = d.mime === "application/pdf" ? `<iframe src="${d.url}#page=${page}&view=FitH" title="${esc(d.name)}"></iframe>` : `<img src="${d.url}" alt="${esc(d.name)}">`;
-  $("viewer").classList.remove("hidden");
+function normPages(doc) {
+  let a = normCache.get(doc.texts);
+  if (!a) { a = doc.texts.map((t) => norm(t || "")); normCache.set(doc.texts, a); }
+  return a;
 }
 
 /**
- * Intercepta cliques em links de página (#pdf=ID&p=N).
+ * Confere se o TAG aparece no texto da página (tolera confusões de OCR em documentos lidos por OCR).
+ * @param {object} doc Documento.
+ * @param {number} page Página (1..N).
+ * @param {string} tag TAG.
+ * @returns {boolean|null} true/false, ou null se a página não tem texto lido.
+ */
+function pageHasTag(doc, page, tag) {
+  if (!doc.texts || !doc.texts[page - 1]) return null;
+  const txt = normPages(doc)[page - 1], v = norm(tag);
+  return hasTerm(txt, v) || (!!doc.ocr && skel(txt).includes(skel(v)));
+}
+
+/**
+ * Estado da citação: ok (TAGs achados na página), warn (algum TAG não achado), badpage (página inexistente) ou none (sem como conferir).
+ * @param {object} doc Documento citado.
+ * @param {number} page Página citada.
+ * @param {string[]} tags TAGs da mesma frase.
+ * @returns {string} Estado.
+ */
+function citeState(doc, page, tags) {
+  if (!doc) return "none";
+  if (doc.pageCount && page > doc.pageCount) return "badpage";
+  if (!tags.length) return "none";
+  const res = tags.map((t) => pageHasTag(doc, page, t));
+  if (res.every((r) => r === null)) return "none";
+  return res.every((r) => r !== false) ? "ok" : "warn";
+}
+
+/**
+ * Extrai (documento, página, TAGs da mesma linha) de uma citação [LIDO: ...].
+ * @param {string} str Texto completo.
+ * @param {{1:string,index:number}} m Casamento da citação.
+ * @returns {{doc:object,page:number,tags:string[]}|null} Dados da citação.
+ */
+function citeInfo(str, m) {
+  const pg = m[1].match(/p[áa]g(?:ina)?s?\.?\s*(\d+)/i);
+  const doc = matchDoc(m[1]);
+  if (!pg || !doc) return null;
+  const ls = str.lastIndexOf("\n", m.index) + 1;
+  const tags = [...new Set(str.slice(ls, m.index).replace(/[*`_]/g, "").match(STRONG_TAG) || [])].filter((t) => !SHEET_CODE.test(t)).slice(-3);
+  return { doc, page: Number(pg[1]), tags };
+}
+
+/**
+ * Transforma [LIDO: arquivo, ..., pág. N, ...] em links que abrem a página (com o TAG destacado) e marca ✔/⚠/⛔ pela conferência com o texto da página.
+ * @param {string} md Markdown.
+ * @returns {string} Markdown com links.
+ */
+function linkifyRefs(md) {
+  return md.replace(/\[LIDO:([^\]]*)\]/g, (all, inner, off) => {
+    const ci = citeInfo(md, { 1: inner, index: off });
+    if (!ci) return all;
+    const mark = { ok: "✔", warn: "⚠", badpage: "⛔", none: "" }[citeState(ci.doc, ci.page, ci.tags)];
+    const hl = ci.tags.length ? `&hl=${encodeURIComponent(ci.tags.join(","))}` : "";
+    return `[📄${mark} LIDO:${inner}](#pdf=${ci.doc.id}&p=${ci.page}${hl})`;
+  });
+}
+
+/**
+ * Conferência automática do diagnóstico: citações confirmadas, não confirmadas e TAGs sem origem nos documentos lidos.
+ * @param {string} md Markdown do diagnóstico.
+ * @returns {{ok:number,warn:number,none:number,bad:number,orphan:string[]}} Resumo.
+ */
+function verifySummary(md) {
+  const r = { ok: 0, warn: 0, none: 0, bad: 0, orphan: [] };
+  for (const m of md.matchAll(/\[LIDO:([^\]]*)\]/g)) {
+    const ci = citeInfo(md, m);
+    if (!ci) continue;
+    const st = citeState(ci.doc, ci.page, ci.tags);
+    if (st === "badpage") r.bad++; else r[st]++;
+  }
+  const withText = state.docs.filter((d) => d.texts && d.texts.some(Boolean));
+  if (withText.length) {
+    const clean = md.replace(/\[(?:LIDO|INFERIDO)[^\]]*\]/g, "").replace(/[*`_]/g, "");
+    for (const tag of new Set(clean.match(STRONG_TAG) || [])) {
+      if (SHEET_CODE.test(tag)) continue;
+      if (!withText.some((d) => d.texts.some((t, i) => t && pageHasTag(d, i + 1, tag)))) r.orphan.push(tag);
+    }
+  }
+  return r;
+}
+
+/** Mostra a conferência automática acima do diagnóstico. */
+function renderVerify(md) {
+  const v = verifySummary(md || "");
+  const p = [];
+  if (v.ok) p.push(`<span class="vb-ok">✔ ${v.ok} citação(ões) confirmada(s)</span>`);
+  if (v.warn) p.push(`<span class="vb-w">⚠ ${v.warn} com TAG não encontrado na página citada</span>`);
+  if (v.bad) p.push(`<span class="vb-w">⛔ ${v.bad} página inexistente</span>`);
+  if (v.none) p.push(`${v.none} sem como conferir`);
+  if (v.orphan.length) p.push(`<span class="vb-w">⚠ TAG(s) que não aparecem em nenhuma página lida: ${v.orphan.map(esc).join(", ")}</span>`);
+  $("verifyBar").innerHTML = p.length ? `<strong>Conferência automática:</strong> ${p.join(" · ")}. Confirme no desenho antes de medir.` : "";
+  $("verifyBar").classList.toggle("hidden", !p.length);
+}
+
+/**
+ * Obtém (e guarda em cache) o documento PDF no pdf.js.
+ * @param {object} d Documento.
+ * @returns {Promise<object>} PDF do pdf.js.
+ */
+async function getPdfProxy(d) {
+  if (pdfCache.has(d.id)) return pdfCache.get(d.id);
+  const lib = await loadPdfJs();
+  const pdf = await lib.getDocument({ data: new Uint8Array(d.bytes.slice(0)) }).promise;
+  pdfCache.set(d.id, pdf);
+  return pdf;
+}
+
+/**
+ * Caixas (em pontos, escala 1) onde os TAGs aparecem na página: do texto do PDF ou das caixas gravadas pelo OCR.
+ * @param {object} d Documento.
+ * @param {object} pdfPage Página do pdf.js.
+ * @param {number} pageNo Página (1..N).
+ * @param {string[]} tags TAGs a destacar.
+ * @returns {Promise<number[][]>} Caixas [x0,y0,x1,y1].
+ */
+async function findBoxes(d, pdfPage, pageNo, tags) {
+  if (!tags.length) return [];
+  const want = tags.map((t) => norm(t));
+  const out = [];
+  const ob = d.boxes && d.boxes[pageNo - 1];
+  if (ob) {
+    for (const [t, x0, y0, x1, y1] of ob) {
+      const nt = norm(t);
+      if (want.some((w) => nt.includes(w) || (d.ocr && skel(nt).includes(skel(w))))) out.push([x0, y0, x1, y1]);
+    }
+    return out;
+  }
+  try {
+    const tc = await pdfPage.getTextContent();
+    const vp1 = pdfPage.getViewport({ scale: 1 });
+    for (const it of tc.items) {
+      const nt = norm(it.str || "");
+      if (nt && want.some((w) => nt.includes(w))) {
+        const x = it.transform[4], y = it.transform[5];
+        const r = vp1.convertToViewportRectangle([x, y, x + it.width, y + (it.height || 8)]);
+        out.push([Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])]);
+      }
+    }
+  } catch { /* sem texto */ }
+  return out;
+}
+
+/**
+ * Abre o visualizador de desenho na página indicada (com TAGs destacados).
+ * @param {string} docId Id do documento.
+ * @param {number} [page] Página original.
+ * @param {string[]} [hl] TAGs a destacar.
+ */
+function openViewer(docId, page = 1, hl = []) {
+  const d = state.docs.find((x) => x.id === docId);
+  if (!d) { toast("Documento não está mais salvo. Adicione-o em Documentos."); return; }
+  Object.assign(V, { id: d.id, doc: d, page: Math.max(1, page), zoom: 1, hl });
+  $("viewer").classList.remove("hidden");
+  renderViewer();
+}
+
+/** Desenha a página atual no visualizador (canvas, zoom e destaque dos TAGs). */
+async function renderViewer() {
+  const d = V.doc, token = ++V.busy, wrap = $("vWrap");
+  $("vTitle").textContent = `${d.name} — pág. ${V.page}${d.pageCount > 1 ? ` / ${d.pageCount}` : ""}`;
+  $("vPage").value = V.page;
+  if (!d.url) d.url = URL.createObjectURL(new Blob([d.bytes], { type: d.mime }));
+  viewerUrl = `${d.url}#page=${V.page}`;
+  const stage = $("vStage");
+  const stageW = Math.max(280, stage.clientWidth - 16);
+  $("vChk").classList.add("hidden");
+  if (d.mime !== "application/pdf") { wrap.innerHTML = `<img src="${d.url}" alt="${esc(d.name)}" style="width:${Math.round(stageW * V.zoom)}px">`; return; }
+  wrap.innerHTML = '<p style="padding:20px;color:#333;line-height:1.4">Carregando página…</p>';
+  try {
+    const pdf = await getPdfProxy(d);
+    if (V.busy !== token) return;
+    const pageNo = Math.min(Math.max(1, V.page), pdf.numPages);
+    const page = await pdf.getPage(pageNo);
+    const vp1 = page.getViewport({ scale: 1 });
+    const cssScale = (stageW / vp1.width) * V.zoom;
+    let scale = cssScale * Math.min(window.devicePixelRatio || 1, 2);
+    if (vp1.width * vp1.height * scale * scale > 16e6) scale = Math.sqrt(16e6 / (vp1.width * vp1.height));
+    const vp = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(vp.width);
+    canvas.height = Math.ceil(vp.height);
+    canvas.style.width = `${Math.round(vp1.width * cssScale)}px`;
+    canvas.style.height = `${Math.round(vp1.height * cssScale)}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    if (V.busy !== token) return;
+    wrap.innerHTML = "";
+    wrap.append(canvas);
+    const boxes = await findBoxes(d, page, pageNo, V.hl);
+    if (V.busy !== token) return;
+    for (const b of boxes) {
+      const el = document.createElement("div");
+      el.className = "hl";
+      Object.assign(el.style, { left: `${b[0] * cssScale}px`, top: `${b[1] * cssScale}px`, width: `${(b[2] - b[0]) * cssScale}px`, height: `${(b[3] - b[1]) * cssScale}px` });
+      wrap.append(el);
+    }
+    if (V.hl.length) {
+      const res = V.hl.map((t) => ({ t, f: pageHasTag(d, pageNo, t) }));
+      const known = res.filter((r) => r.f !== null);
+      if (known.length) {
+        $("vChk").innerHTML = known.map((r) => (r.f ? `<span class="vb-ok">✔ ${esc(r.t)} encontrado nesta página${boxes.length ? " (destacado)" : ""}</span>` : `<span class="vb-w">⚠ ${esc(r.t)} não encontrado no texto desta página — confira no desenho</span>`)).join(" · ");
+        $("vChk").classList.remove("hidden");
+      }
+    }
+    if (boxes[0] && stage.scrollTo) stage.scrollTo({ left: Math.max(0, boxes[0][0] * cssScale - 40), top: Math.max(0, boxes[0][1] * cssScale - 80), behavior: "smooth" });
+  } catch (e) { wrap.innerHTML = `<p style="padding:16px;color:#900;line-height:1.4">Não foi possível exibir a página: ${esc(e.message)}. Use "Nova aba".</p>`; }
+}
+
+/** Vai para a página (limitada ao intervalo do documento). */
+function gotoPage(p) {
+  if (!V.doc) return;
+  V.page = Math.min(Math.max(1, Math.round(p) || 1), V.doc.pageCount || 1);
+  renderViewer();
+}
+
+/** Aplica um fator de zoom ao visualizador. */
+function zoomView(f) { V.zoom = Math.min(5, Math.max(0.6, V.zoom * f)); renderViewer(); }
+
+/** Gestos do visualizador: deslizar troca de página (sem zoom), toque duplo alterna o zoom, setas do teclado. */
+function bindViewerGestures() {
+  const st = $("vStage");
+  let x0 = null, y0 = null, tLast = 0;
+  st.addEventListener("touchstart", (e) => { if (e.touches.length === 1) { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; } else x0 = null; }, { passive: true });
+  st.addEventListener("touchend", (e) => {
+    if (x0 === null || !e.changedTouches.length) return;
+    const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+    if (V.zoom <= 1.05 && Math.abs(dx) > 90 && Math.abs(dy) < 60) gotoPage(V.page + (dx < 0 ? 1 : -1));
+    else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) { const now = Date.now(); if (now - tLast < 300) { V.zoom = V.zoom > 1.05 ? 1 : 2.5; renderViewer(); } tLast = now; }
+    x0 = null;
+  });
+  document.addEventListener("keydown", (e) => {
+    if ($("viewer").classList.contains("hidden")) return;
+    if (e.key === "ArrowRight") gotoPage(V.page + 1); else if (e.key === "ArrowLeft") gotoPage(V.page - 1); else if (e.key === "Escape") $("viewer").classList.add("hidden");
+  });
+}
+
+/**
+ * Intercepta cliques em links de página (#pdf=ID&p=N&hl=TAGS) e abre o visualizador.
  * @param {MouseEvent} e Evento.
  */
 function onPdfLink(e) {
@@ -1203,7 +1483,7 @@ function onPdfLink(e) {
   if (!a) return;
   e.preventDefault();
   const q = new URLSearchParams(a.getAttribute("href").slice(1));
-  openViewer(q.get("pdf"), Number(q.get("p")) || 1);
+  openViewer(q.get("pdf"), Number(q.get("p")) || 1, (q.get("hl") || "").split(",").filter(Boolean));
 }
 
 /**
@@ -1215,19 +1495,6 @@ function matchDoc(text) {
   const t = (text || "").toLowerCase();
   return state.docs.find((d) => { const n = d.name.toLowerCase(); return t.includes(n) || t.includes(n.replace(/\.[^.]+$/, "")); })
     || [...state.docs].reverse().find((d) => d.mime === "application/pdf");
-}
-
-/**
- * Transforma [LIDO: arquivo, ..., pág. N, ...] em links que abrem a página no visualizador.
- * @param {string} md Markdown.
- * @returns {string} Markdown com links.
- */
-function linkifyRefs(md) {
-  return md.replace(/\[LIDO:([^\]]*)\]/g, (all, inner) => {
-    const pg = inner.match(/p[áa]g(?:ina)?s?\.?\s*(\d+)/i);
-    const doc = matchDoc(inner);
-    return pg && doc ? `[📄 LIDO:${inner}](#pdf=${doc.id}&p=${pg[1]})` : all;
-  });
 }
 
 /* ============ SEÇÕES DO RESULTADO ============ */
@@ -1378,7 +1645,9 @@ async function saveCase() {
   c.turns = state.turns;
   try {
     for (const p of c.photos) if (!p.saved && p.dataUrl) { await store.put("blobs", p.dataUrl, `${c.id}:${p.id}`); p.saved = true; }
-    await store.put("cases", { ...c, photos: c.photos.map(({ id, name, thumb }) => ({ id, name, thumb })) });
+    const rec = { ...c, photos: c.photos.map(({ id, name, thumb }) => ({ id, name, thumb })) };
+    await store.put("cases", rec);
+    casesCache = [rec, ...casesCache.filter((x) => x.id !== rec.id)];
     scheduleSync();
   } catch { /* armazenamento indisponível */ }
 }
@@ -1396,6 +1665,7 @@ function renderResult() {
   showResult();
   $("resTitle").textContent = c.title;
   $("answer").innerHTML = renderAnswer(c.answer || "");
+  renderVerify(c.answer || "");
   $("pagesUsed").innerHTML = (c.pagesUsed || []).flatMap((u) => u.pages.map((p) => `<a class="chip" href="#pdf=${u.docId}&p=${p}" title="${esc(u.name)}">📄 pág. ${p}</a>`)).join("");
   $("fixedChk").checked = c.status === "corrigido";
   $("fixNote").classList.toggle("hidden", c.status !== "corrigido");
@@ -1436,6 +1706,10 @@ async function renderHistory() {
   if (!store) { $("last3").innerHTML = '<p class="mute">Armazenamento local indisponível neste navegador.</p>'; return; }
   let all = [];
   try { all = (await store.all("cases")).sort((a, b) => b.updatedAt - a.updatedAt); } catch { /* ignora */ }
+  casesCache = all;
+  const fixedCases = all.filter((c) => c.status === "corrigido" && c.correctedAt);
+  const mttr = fixedCases.length ? fixedCases.reduce((a, c) => a + (c.correctedAt - c.createdAt), 0) / fixedCases.length / 36e5 : null;
+  $("stats").textContent = all.length ? `📊 ${all.length} caso(s) · ${all.filter((c) => c.status === "corrigido").length} corrigido(s)${mttr !== null ? ` · tempo médio até corrigir: ${mttr < 1 ? `${Math.round(mttr * 60)} min` : `${mttr.toFixed(1)} h`}` : ""}` : "";
   const card = (c) => {
     const sec1 = splitSections(c.answer || "").find((s) => secNum(s.title) === "1");
     const resumo = sec1 ? sec1.body.replace(/\[(LIDO|INFERIDO)[^\]]*\]/g, "").replace(/[*_`#>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 150) : "";
@@ -1484,6 +1758,7 @@ async function diagnose() {
   const { plan, notes } = planSources(query);
   const pdfPlan = plan.filter((p) => p.doc.mime === "application/pdf");
   if (!plan.length && !state.photos.length) { setStatus(notes[0] || "Nada encontrado nos documentos. Tente outras palavras, ajuste o glossário ou informe páginas extras (ex.: 37-45).", true); return; }
+  if (!navigator.onLine) { showOfflineCandidates(query, plan); return; }
   if (pdfPlan.length && !PDFDocument) { setStatus("O recorte de páginas (pdf-lib) não carregou. Verifique a internet e recarregue a página.", true); return; }
   const photos = [...state.photos];
   state.caseRec = newCase(query, pdfPlan.map((p) => ({ docId: p.doc.id, name: p.doc.name, pages: p.pages })));
@@ -1506,10 +1781,12 @@ async function diagnose() {
     for (const ph of photos) parts.push({ text: `Foto de campo: ${ph.name}` }, { inlineData: { mimeType: "image/jpeg", data: ph.dataUrl.split(",")[1] } });
     const used = pdfPlan.map((p) => `${p.doc.name}: págs. ${p.pages.join(", ")}`);
     const snips = pdfPlan.flatMap((p) => p.hits.slice(0, 5).map((h) => `- ${p.doc.name}, pág. ${h.page}: …${h.snip}…`));
+    const sims = similarCases(query, null).top.filter(({ c }) => c.status === "corrigido" && c.fixNote).slice(0, 2);
+    const histCtx = sims.length ? `\nHistórico local de casos semelhantes já corrigidos (informado pelo técnico; não verificado):\n${sims.map(({ c }) => `- "${c.title}" (${new Date(c.updatedAt).toLocaleDateString("pt-BR")}): ${c.fixNote.slice(0, 300)}`).join("\n")}` : "";
     const text = `Falha/alarme consultado: ${query}${state.focus ? `\n\nFoco: ${state.focus}` : ""}\n\nResponda no formato obrigatório.`
       + (used.length ? `\n\nPáginas enviadas (numeração original): ${used.join("; ")}.` : "")
       + (snips.length ? `\nTrechos encontrados pela busca local (podem conter erros):\n${snips.join("\n")}` : "")
-      + (photos.length ? FIELD_NOTE : "");
+      + histCtx + (photos.length ? FIELD_NOTE : "");
     state.contents = [{ role: "user", parts: [...parts, { text }] }];
     const answer = await buildGateway().generate(state.contents, DIAG_INSTRUCTION, (acc) => { $("answer").innerHTML = `<div class="md">${renderMarkdown(acc)}</div>`; });
     state.contents.push({ role: "model", parts: [{ text: answer }] });
@@ -1523,6 +1800,7 @@ async function diagnose() {
   } catch (err) {
     $("answer").innerHTML = `<p>⚠️ ${esc(explainError(err))}</p>`;
     setStatus(`Erro: ${explainError(err)}`, true);
+    if (!navigator.onLine || /Failed to fetch|NetworkError|Load failed/i.test(String(err && err.message))) showOfflineCandidates(query, plan);
   } finally {
     setGenerating(false);
     $("diagBtn").disabled = false;
@@ -1642,6 +1920,10 @@ async function buildReport() {
     imgs.push(`<img src="${u}" alt="foto de campo" style="max-width:48%;margin:2px;border:1px solid #888">`);
   }
   const fixed = c.status === "corrigido";
+  const clean = (t) => esc(String(t || "").replace(/\[(?:LIDO|INFERIDO)[^\]]*\]/g, "").replace(/[*`]/g, ""));
+  const stepsHtml = (c.steps || []).some((x) => x.result) || (c.safety && c.safety.at)
+    ? `<h2>Passos executados em campo</h2>${c.safety && c.safety.at ? `<p><b>Checklist de segurança</b> confirmado em ${new Date(c.safety.at).toLocaleString("pt-BR")}: ${esc((c.safety.items || []).join("; "))}.</p>` : ""}<table><tr><th>#</th><th>Passo</th><th>Resultado</th><th>Valor medido</th><th>Obs.</th><th>Hora</th></tr>${(c.steps || []).map((x, i) => (x.result ? `<tr><td>${i + 1}</td><td>${clean(x.text)}</td><td>${x.result === "ok" ? "✔ OK" : x.result === "diff" ? "✘ Diferente" : "—"}</td><td>${esc(x.value || "")}</td><td>${esc(x.note || "")}</td><td>${x.at ? new Date(x.at).toLocaleTimeString("pt-BR") : ""}</td></tr>` : "")).join("")}</table>`
+    : "";
   const html = `<!doctype html><meta charset="utf-8"><title>Relatório ${esc(os)}</title><style>body{font:13px/1.5 Arial,sans-serif;margin:24px;color:#000}h1{font-size:19px}h2{font-size:15px;border-bottom:1px solid #000;margin:18px 0 6px}code{background:#eee}table{border-collapse:collapse}td,th{border:1px solid #888;padding:3px 6px}.box{border:1px solid #888;padding:8px;min-height:60px}.sig{display:flex;gap:40px;margin-top:46px}.sig div{flex:1;border-top:1px solid #000;text-align:center;padding-top:4px}</style>
 <h1>Relatório de Falha / OS — HydroDiag</h1>
 <p><b>OS/Equipamento:</b> ${esc(os)} &nbsp; <b>Aberto em:</b> ${new Date(c.createdAt).toLocaleString("pt-BR")} &nbsp; <b>Status:</b> ${fixed ? "✔ Corrigido" + (c.correctedAt ? " em " + new Date(c.correctedAt).toLocaleString("pt-BR") : "") : "⏳ Em aberto"}<br><b>Falha consultada:</b> ${esc(c.query)}</p>
@@ -1650,6 +1932,7 @@ async function buildReport() {
 <h2>3. O que fazer e correção a aplicar</h2>${pick(3)}
 <h2>4. Peça e localização física</h2>${pick(4)}
 <h2>5. Próximo desenho</h2>${pick(5)}
+${stepsHtml}
 ${imgs.length ? `<h2>Fotos de campo</h2>${imgs.join("")}` : ""}
 <h2>6. Solução do problema (aplicada)</h2><div class="box">${c.fixNote ? esc(c.fixNote).replace(/\n/g, "<br>") : ""}</div>
 <div class="sig"><div>Executante</div><div>Responsável</div></div>
@@ -1928,7 +2211,7 @@ async function syncNow() {
       if ((syncMeta.pushed[`d:${d.id}`] || 0) >= ts) continue;
       const path = `${uid}/docs/${d.id}`;
       if (!syncMeta.docsUp[d.id]) { must(await c.storage.from(SB_BUCKET).upload(path, new Blob([d.bytes], { type: d.mime }), { upsert: true, contentType: d.mime })); syncMeta.docsUp[d.id] = true; }
-      must(await c.from("hd_docs").upsert({ user_id: uid, id: d.id, name: d.name, mime: d.mime, page_count: d.pageCount, text_status: d.textStatus, texts: d.texts, storage_path: path, size_bytes: d.bytes.byteLength, updated_at_ms: ts, deleted: false }, { onConflict: "user_id,id" }));
+      must(await c.from("hd_docs").upsert({ user_id: uid, id: d.id, name: d.name, mime: d.mime, page_count: d.pageCount, text_status: d.textStatus, texts: d.texts, boxes: d.boxes || null, storage_path: path, size_bytes: d.bytes.byteLength, updated_at_ms: ts, deleted: false }, { onConflict: "user_id,id" }));
       syncMeta.pushed[`d:${d.id}`] = ts;
     }
     // 4) glossário local -> nuvem
@@ -1956,10 +2239,10 @@ async function syncNow() {
         setCloudChip(`☁ baixando ${row.name}…`);
         const dl = must(await c.storage.from(SB_BUCKET).download(row.storage_path));
         const bytes = await dl.data.arrayBuffer();
-        await store.put("docs", { id: row.id, name: row.name, mime: row.mime, bytes, pageCount: row.page_count, texts: row.texts, textStatus: row.text_status, addedAt: row.updated_at_ms, updatedAt: row.updated_at_ms });
+        await store.put("docs", { id: row.id, name: row.name, mime: row.mime, bytes, pageCount: row.page_count, texts: row.texts, boxes: row.boxes || null, ocr: Array.isArray(row.boxes), textStatus: row.text_status, addedAt: row.updated_at_ms, updatedAt: row.updated_at_ms });
         syncMeta.docsUp[row.id] = true;
       } else if (row.updated_at_ms > (local.updatedAt || 0)) {
-        await store.put("docs", { ...local, texts: row.texts, textStatus: row.text_status, pageCount: row.page_count, updatedAt: row.updated_at_ms });
+        await store.put("docs", { ...local, texts: row.texts, boxes: row.boxes || local.boxes, ocr: Array.isArray(row.boxes) || local.ocr, textStatus: row.text_status, pageCount: row.page_count, updatedAt: row.updated_at_ms });
       }
       syncMeta.pushed[`d:${row.id}`] = Math.max(syncMeta.pushed[`d:${row.id}`] || 0, row.updated_at_ms);
       syncMeta.pullDocs = Math.max(syncMeta.pullDocs || 0, row.updated_at_ms);
@@ -1985,6 +2268,194 @@ async function syncNow() {
     saveMeta();
     syncBusy = false;
   }
+}
+
+/* ============ PASSO A PASSO DE CAMPO (segurança + medições) ============ */
+const SAFETY_ITEMS = [
+  "Desenergizei e bloqueei (LOTO) o que for necessário, com ausência de tensão verificada",
+  "Estou com EPI adequado e habilitado conforme a NR-10",
+  "Multímetro com categoria (CAT) adequada, em bom estado e testado em fonte conhecida",
+  "Conferi folha, borne e revisão no desenho oficial (links 📄)"
+];
+const W = { i: 0, ask: false };
+
+/**
+ * Converte as seções "Como confirmar" e "O que fazer" do diagnóstico em passos (um por item de lista).
+ * @param {string} md Markdown do diagnóstico.
+ * @returns {{sec:string,text:string}[]} Passos.
+ */
+function parseSteps(md) {
+  const secs = splitSections(md), out = [];
+  for (const n of ["2", "3"]) {
+    for (const sc of secs.filter((x) => secNum(x.title) === n)) {
+      let any = false;
+      for (const ln of sc.body.split("\n")) {
+        const m = ln.match(/^ {0,3}(?:[-*]|\d+[.)])\s+(.*\S)/);
+        if (m) { out.push({ sec: n, text: m[1] }); any = true; }
+      }
+      if (!any && sc.body.trim()) out.push({ sec: n, text: sc.body.trim().replace(/\n+/g, " ") });
+    }
+  }
+  return out;
+}
+
+/** Abre o passo a passo do caso atual (primeiro o checklist de segurança). */
+function openWizard() {
+  const c = state.caseRec;
+  if (!c || !c.answer) { toast("Faça um diagnóstico primeiro."); return; }
+  if (!c.steps || !c.steps.length) c.steps = parseSteps(c.answer).map((x) => ({ ...x, result: null, value: "", note: "", at: null }));
+  if (!c.steps.length) { toast("O diagnóstico não trouxe passos de medição ou correção."); return; }
+  const k = c.steps.findIndex((x) => !x.result);
+  W.i = k < 0 ? c.steps.length : k;
+  W.ask = false;
+  $("wizard").classList.remove("hidden");
+  renderWizard();
+}
+
+/** Desenha a tela atual do passo a passo (segurança, passo ou resumo). */
+function renderWizard() {
+  const c = state.caseRec, steps = c.steps, n = steps.length, body = $("wBody");
+  const short = (t) => String(t || "").replace(/\[(?:LIDO|INFERIDO)[^\]]*\]/g, "").replace(/[*`]/g, "").trim();
+  if (!c.safety || !c.safety.at) {
+    $("wTitle").textContent = "🧭 Segurança";
+    body.innerHTML = `<div class="card"><h2>⚠️ Antes de começar</h2><p class="mute">Confirme cada item. Sem isso o passo a passo não inicia.</p>${SAFETY_ITEMS.map((t, k) => `<label class="chk"><input type="checkbox" class="sf" data-k="${k}"> ${esc(t)}</label>`).join("")}<button id="wStart" class="primary vbtn" disabled data-w="start">▶ Iniciar passo a passo</button></div>`;
+    return;
+  }
+  if (W.i >= n) {
+    const cnt = (r) => steps.filter((x) => x.result === r).length;
+    $("wTitle").textContent = "🧭 Resumo";
+    body.innerHTML = `<div class="card"><h2>✅ Resumo</h2><p>${cnt("ok")} OK · ${cnt("diff")} diferente(s) · ${steps.filter((x) => !x.result || x.result === "skip").length} pulado(s)/pendente(s)</p>${steps.map((x, k) => `<div class="item col1"><div>${k + 1}. ${esc(short(x.text).slice(0, 160))}</div><div class="mute">${{ ok: "✔ OK", diff: "✘ Diferente", skip: "— pulado" }[x.result] || "pendente"}${x.value ? ` · medido: ${esc(x.value)}` : ""}${x.note ? ` · ${esc(x.note)}` : ""}</div></div>`).join("")}<div class="row"><button class="primary vbtn" data-w="report">🧾 Gerar relatório</button><button class="vbtn" data-w="close">Fechar</button><button class="vbtn" data-w="restart">↺ Refazer</button></div></div>`;
+    return;
+  }
+  const s0 = steps[W.i];
+  $("wTitle").textContent = `🧭 Passo ${W.i + 1} de ${n}`;
+  body.innerHTML = `<div class="mute">${s0.sec === "2" ? "📟 Confirmar" : "🛠️ Corrigir"} · ${s0.result ? `registrado: ${{ ok: "✔ OK", diff: "✘ diferente", skip: "— pulado" }[s0.result]}` : "pendente"}</div>
+  <div class="card wstep"><div class="md">${renderMarkdown(s0.text)}</div></div>
+  ${W.ask ? `<div class="sim"><strong>Resultado diferente do esperado</strong><button class="vbtn primary" data-w="ask">💬 Perguntar ao chat o próximo passo</button><button class="vbtn" data-w="next">Continuar para o próximo passo</button></div>` : `
+  <input id="wVal" inputmode="decimal" autocomplete="off" placeholder="Valor medido (ex.: 24,1 V) — opcional" value="${esc(s0.value || "")}">
+  <input id="wNote" autocomplete="off" placeholder="Observação — opcional" value="${esc(s0.note || "")}">
+  <div class="row"><button class="vbtn okb" style="flex:1" data-w="ok">✔ Como esperado</button><button class="vbtn errb" style="flex:1" data-w="diff">✘ Diferente</button></div>
+  <div class="row"><button data-w="back">◀ Voltar</button><button data-w="skip">Pular ▶</button></div>`}`;
+}
+
+/**
+ * Trata os botões do passo a passo: registra resultado, valor e observação; "Diferente" permite perguntar ao chat.
+ * @param {MouseEvent} e Evento.
+ */
+function onWizardClick(e) {
+  const b = e.target.closest("button[data-w]");
+  if (!b) return;
+  const c = state.caseRec, a = b.dataset.w;
+  if (!c) return;
+  if (a === "start") { c.safety = { at: Date.now(), items: SAFETY_ITEMS }; saveCase(); renderWizard(); return; }
+  const s0 = c.steps[W.i];
+  const rec = (r) => { s0.result = r; if ($("wVal")) s0.value = $("wVal").value.trim(); if ($("wNote")) s0.note = $("wNote").value.trim(); s0.at = Date.now(); saveCase(); };
+  if (a === "ok") { rec("ok"); W.i++; W.ask = false; }
+  else if (a === "diff") { rec("diff"); W.ask = true; }
+  else if (a === "skip") { rec("skip"); W.i++; W.ask = false; }
+  else if (a === "next") { W.i++; W.ask = false; }
+  else if (a === "back") { W.i = Math.max(0, W.i - 1); W.ask = false; }
+  else if (a === "ask") {
+    const txt = String(s0.text).replace(/\[(?:LIDO|INFERIDO)[^\]]*\]/g, "").replace(/[*`]/g, "").trim().slice(0, 140);
+    $("chatIn").value = `No passo ${W.i + 1} ("${txt}") ${s0.value ? `medi ${s0.value}` : "o resultado"}${s0.note ? ` (obs.: ${s0.note})` : ""} ficou DIFERENTE do esperado. Qual o próximo passo e a causa provável?`;
+    $("wizard").classList.add("hidden");
+    W.ask = false;
+    W.i++;
+    sendChat();
+    if ($("chatCard").scrollIntoView) $("chatCard").scrollIntoView({ behavior: "smooth" });
+    return;
+  }
+  else if (a === "report") { buildReport(); return; }
+  else if (a === "close") { $("wizard").classList.add("hidden"); return; }
+  else if (a === "restart") { c.steps.forEach((x) => Object.assign(x, { result: null, value: "", note: "", at: null })); W.i = 0; W.ask = false; saveCase(); }
+  renderWizard();
+}
+
+/** Habilita "Iniciar" só quando todos os itens de segurança estiverem marcados. */
+function onWizardChange(e) {
+  if (!e.target.classList.contains("sf")) return;
+  $("wStart").disabled = ![...$("wBody").querySelectorAll(".sf")].every((x) => x.checked);
+}
+
+/* ============ CASOS SIMILARES ============ */
+let casesCache = [];
+
+/**
+ * Procura casos anteriores parecidos com a consulta (com o glossário) e conta ocorrências recentes.
+ * @param {string} query Consulta.
+ * @param {string|null} excludeId Caso a ignorar.
+ * @returns {{top:{c:object,sc:number}[],total:number,recent:number}} Melhores casos, total e ocorrências nos últimos 90 dias.
+ */
+function similarCases(query, excludeId) {
+  const concepts = buildConcepts(query, glossary);
+  const none = { top: [], total: 0, recent: 0 };
+  if (!concepts.length) return none;
+  const min = concepts.length >= 3 ? 2 : 1;
+  const rows = [];
+  for (const c of casesCache) {
+    if (c.id === excludeId) continue;
+    const sec1 = splitSections(c.answer || "").find((x) => secNum(x.title) === "1");
+    const txt = norm(`${c.title} ${c.query} ${c.fixNote || ""} ${sec1 ? sec1.body : ""}`);
+    const sc = concepts.filter((cn) => cn.some((v) => hasTerm(txt, v))).length;
+    if (sc >= min) rows.push({ c, sc });
+  }
+  rows.sort((a, b) => b.sc - a.sc || b.c.updatedAt - a.c.updatedAt);
+  return { top: rows.slice(0, 3), total: rows.length, recent: rows.filter((r) => r.c.createdAt > Date.now() - 90 * 864e5).length };
+}
+
+/** Mostra, enquanto o técnico digita, casos parecidos já registrados (com a solução aplicada) e a recorrência. */
+function suggestSimilar() {
+  const q = $("query").value.trim();
+  const el = $("similar");
+  if (q.length < 4) { el.innerHTML = ""; return; }
+  const { top, total, recent } = similarCases(q, state.caseRec && state.caseRec.id);
+  if (!top.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="sim"><strong>🕘 Já aconteceu antes (${total} ocorrência${total > 1 ? "s" : ""})${recent >= 2 ? ` — ⚠ recorrente: ${recent} nos últimos 90 dias` : ""}</strong>${top.map(({ c }) => `<div class="item col1"><div class="row"><span class="badge ${c.status === "corrigido" ? "ok" : "warn"}">${c.status === "corrigido" ? "✔ Corrigido" : "⏳ Em aberto"}</span><span class="mute">${new Date(c.updatedAt).toLocaleDateString("pt-BR")}</span></div><div>${esc(c.title)}</div>${c.fixNote ? `<div><b>Solução aplicada:</b> ${esc(c.fixNote.slice(0, 220))}</div>` : ""}<div class="row"><button data-sim="${c.id}">Abrir caso</button></div></div>`).join("")}</div>`;
+}
+
+/* ============ OFFLINE E INSTALAÇÃO (PWA) ============ */
+const APP_VERSION = "2.2.0";
+
+/** Mostra ou esconde o indicador "offline". */
+function updateNet() { $("netChip").classList.toggle("hidden", navigator.onLine !== false); }
+
+/**
+ * Sem internet: mostra as páginas encontradas pela busca local (abrem no visualizador), sem chamar a IA.
+ * @param {string} query Consulta.
+ * @param {{doc:object,pages:number[],hits:object[]}[]} plan Plano de envio.
+ */
+function showOfflineCandidates(query, plan) {
+  const rows = plan.filter((p) => p.doc.mime === "application/pdf").flatMap((p) => (p.hits.length ? p.hits.map((h) => ({ doc: p.doc, page: h.page, snip: h.snip })) : p.pages.map((pg) => ({ doc: p.doc, page: pg, snip: "" }))));
+  const tags = [...new Set(query.match(/[A-Za-z]{1,6}\d*[:.\-]\d+[A-Za-z0-9]*/g) || [])];
+  const hl = tags.length ? `&hl=${encodeURIComponent(tags.join(","))}` : "";
+  state.caseRec = null;
+  $("resultCard").classList.remove("hidden");
+  $("chatCard").classList.add("hidden");
+  $("resTitle").textContent = query.slice(0, 80);
+  $("pagesUsed").innerHTML = "";
+  $("verifyBar").classList.add("hidden");
+  $("answer").innerHTML = `<p>📴 <strong>Sem conexão com a IA.</strong> Páginas encontradas pela busca local (toque para abrir):</p>${rows.length ? rows.map((r) => `<p><a class="chip" href="#pdf=${r.doc.id}&p=${r.page}${hl}">📄 pág. ${r.page}</a> <span class="mute">${esc(r.doc.name)}${r.snip ? ` — …${esc(r.snip)}…` : ""}</span></p>`).join("") : '<p class="mute">Nenhuma página encontrada localmente.</p>'}<p class="mute">Quando a conexão voltar, toque em Diagnosticar de novo.</p>`;
+  setStatus("Sem internet: mostrando só a busca local.", true);
+}
+
+/** Registra o service worker (offline), pede armazenamento persistente e mostra a versão. */
+function initPwa() {
+  updateNet();
+  $("verInfo").textContent = `Versão ${APP_VERSION}`;
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { /* ignora */ }
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (had) toast("Nova versão instalada. Recarregue a página.", 9000); });
+  }
+}
+
+/** Pede ao navegador para procurar uma versão nova do app. */
+async function checkUpdate() {
+  try {
+    const r = await navigator.serviceWorker.getRegistration();
+    if (r) { await r.update(); toast("Verificação feita. Se houver versão nova, ela será instalada."); } else toast("Atualização automática indisponível neste navegador.");
+  } catch { toast("Não foi possível verificar agora."); }
 }
 
 /* ============ NAVEGAÇÃO E EVENTOS ============ */
@@ -2093,6 +2564,23 @@ function bind() {
   $("stopFab").onclick = requestStop;
   $("vClose").onclick = () => $("viewer").classList.add("hidden");
   $("vNew").onclick = () => { if (viewerUrl) window.open(viewerUrl, "_blank"); };
+  $("vPrev").onclick = () => gotoPage(V.page - 1);
+  $("vNext").onclick = () => gotoPage(V.page + 1);
+  $("vPage").onchange = () => gotoPage(Number($("vPage").value));
+  $("vZin").onclick = () => zoomView(1.3);
+  $("vZout").onclick = () => zoomView(1 / 1.3);
+  $("vFit").onclick = () => { V.zoom = 1; renderViewer(); };
+  bindViewerGestures();
+  $("guideBtn").onclick = openWizard;
+  $("wClose").onclick = () => $("wizard").classList.add("hidden");
+  $("wBody").onclick = onWizardClick;
+  $("wBody").onchange = onWizardChange;
+  let simT = null;
+  $("query").addEventListener("input", () => { clearTimeout(simT); simT = setTimeout(suggestSimilar, 350); });
+  $("similar").onclick = (e) => { const b = e.target.closest("button[data-sim]"); if (b) openCase(b.dataset.sim); };
+  $("updBtn").onclick = checkUpdate;
+  window.addEventListener("online", updateNet);
+  window.addEventListener("offline", updateNet);
   $("cloudGoogle").onclick = cloudGoogle;
   $("cloudLink").onclick = cloudMagicLink;
   $("cloudIn").onclick = () => cloudLogin(false);
@@ -2110,6 +2598,7 @@ bind();
 loadDocs();
 renderHistory();
 cloudInit();
+initPwa();
 if (!cfg.key) toast("Cole sua chave do Gemini em Ajustes para começar.", 5000);
 </script>
 </body>

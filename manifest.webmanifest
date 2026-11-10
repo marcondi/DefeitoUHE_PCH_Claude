@@ -1,0 +1,32 @@
+{
+  "name": "HydroDiag — Diagnóstico de falhas PCH/UHE",
+  "short_name": "HydroDiag",
+  "description": "Diagnóstico de falhas em usinas hidrelétricas com busca nos desenhos do projeto.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f141a",
+  "theme_color": "#0f141a",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
